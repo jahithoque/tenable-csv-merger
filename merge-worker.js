@@ -187,6 +187,8 @@ function mergeWorkerMain() {
     fqdn: ['fqdn', 'dns name', 'host-fqdn'],
     os: ['os', 'operating system', 'operating-system'],
     desc: ['description'],
+    output: ['plugin output', 'output'],
+    service: ['service', 'svc_name'],
   };
   const INFO_LEVELS = new Set(['none', 'info', 'informational']);
 
@@ -219,6 +221,25 @@ function mergeWorkerMain() {
     if (r === 'high' || r === 'critical') return 'FAILED';
     if (r === 'medium' || r === 'low') return 'WARNING';
     return '';
+  }
+
+  // Credential failure plugins (e.g. 104410) list each failed login as
+  // "Protocol : SMB / Port : 445 / User : 'admin' / Error : …" blocks.
+  const AUTH_FIELDS = ['protocol', 'port', 'user', 'domain', 'error'];
+  function parseAuthOutput(text) {
+    const found = { protocol: new Set(), port: new Set(), user: new Set(), domain: new Set(), error: new Set() };
+    const re = /^[ \t]*(Protocol|Port|User(?:name)?|Domain|Error|Message)[ \t]*:[ \t]*(.+)$/gim;
+    let m;
+    while ((m = re.exec(text))) {
+      let key = m[1].toLowerCase();
+      if (key === 'username') key = 'user';
+      if (key === 'message') key = 'error';
+      const v = m[2].trim().replace(/^'(.*)'$/, '$1');
+      if (v && found[key].size < 20) found[key].add(v);
+    }
+    const out = {};
+    for (const k of AUTH_FIELDS) out[k] = [...found[k]].join('; ');
+    return out;
   }
 
   // Buckets: 0 critical, 1 high, 2 medium, 3 low, 4 info, 5 other.
@@ -1264,6 +1285,16 @@ function mergeWorkerMain() {
       this.checks = new Map();      // check name -> { audit, comp[4] }
       this.pairs = new HashSet64(); // (plugin, host) pairs, for "hosts affected"
       this.sevHosts = [new Set(), new Set(), new Set(), new Set(), new Set(), new Set()];
+      this.auth = [];               // one entry per distinct failed-login finding
+      this.authSeen = new HashSet64();
+      this.authHosts = new Set();
+    }
+
+    addAuth(a) {
+      const [x, y] = hash64([a.host, a.plugin, a.protocol, a.port, a.output].join('\x1f'));
+      if (!this.authSeen.add(x, y)) return; // same finding from another scan
+      if (a.host) { this.authHosts.add(a.host); this.host(a.host, a.ip, a.fqdn, a.os); }
+      if (this.auth.length < XLSX_MAX_ROWS) this.auth.push({ ...a, parsed: parseAuthOutput(a.output) });
     }
 
     host(name, ip, fqdn, os) {
@@ -1308,6 +1339,7 @@ function mergeWorkerMain() {
     }
 
     get vulnTotal() { return this.sev.reduce((a, b) => a + b, 0); }
+    get authTotal() { return this.authHosts.size; }
     get compTotal() { return this.comp.reduce((a, b) => a + b, 0); }
   }
 
@@ -1350,9 +1382,32 @@ function mergeWorkerMain() {
     if (hasVulns) add('Unique vulnerabilities (plugins)', agg.plugins.size);
     if (hasComp) add('Compliance checks evaluated', agg.compTotal);
     if (hasComp) add({ v: 'Compliance score', s: ST.bold }, { v: compScore, s: ST.pct });
+    if (meta.authPlugins.length) {
+      add({ v: 'Hosts with failed authentication', s: ST.bold }, { v: agg.authTotal, s: agg.authTotal ? ST.failed : ST.passed });
+    }
     add('Duplicates removed', meta.duplicates);
     add('Rows excluded (informational / rules)', meta.excluded);
     blank();
+
+    const authList = agg.auth.slice().sort((x, y) => collator.compare(x.host, y.host) || collator.compare(x.port, y.port));
+    if (meta.authPlugins.length) {
+      add({ v: `Authentication failures (plugin ${meta.authPlugins.join(', ')})`, s: ST.section });
+      if (!authList.length) {
+        add({ v: 'No authentication failures found — credentials worked on every host that reported.', s: ST.passed });
+      } else {
+        add({ v: `${agg.authTotal} host${agg.authTotal === 1 ? '' : 's'} could not be scanned with the provided credentials, so their results may be incomplete.`, s: ST.note });
+        add(...['Host', 'IP Address', 'Auth protocol', 'Port', 'User', 'Error'].map(v => ({ v, s: ST.header })));
+        const AUTH_ON_DASHBOARD = 25;
+        for (const a of authList.slice(0, AUTH_ON_DASHBOARD)) {
+          const errText = a.parsed.error || (a.output ? a.output.replace(/\s+/g, ' ').slice(0, 200) : '');
+          add({ v: a.host, s: ST.failed }, a.ip, a.parsed.protocol || a.protocol, asNumber(a.parsed.port || a.port), a.parsed.user, errText);
+        }
+        if (authList.length > AUTH_ON_DASHBOARD) {
+          add({ v: `… and ${authList.length - AUTH_ON_DASHBOARD} more. See the "Auth Failures" sheet.`, s: ST.note });
+        }
+      }
+      blank();
+    }
 
     let chartRow = 3; // zero-based anchor row for the next chart
     if (hasVulns) {
@@ -1436,6 +1491,8 @@ function mergeWorkerMain() {
       if (anyOs) { head.push('OS'); widths.push(34); }
       if (hasVulns) { head.push('Critical', 'High', 'Medium', 'Low', 'Info', 'Total'); widths.push(10, 10, 10, 10, 10, 10); }
       if (hasComp) { head.push('Passed', 'Failed', 'Warning / Manual', 'Error / other', 'Pass rate'); widths.push(10, 10, 17, 13, 11); }
+      const showAuth = agg.authTotal > 0;
+      if (showAuth) { head.push('Auth Failed'); widths.push(12); }
       const hostRows = [head.map(v => ({ v, s: ST.header }))];
       for (const [name, h] of hostList.slice(0, XLSX_MAX_ROWS)) {
         const cells = [name];
@@ -1444,6 +1501,7 @@ function mergeWorkerMain() {
         if (anyOs) cells.push(h.os);
         if (hasVulns) cells.push(...h.sev.slice(0, 5), h.sev.reduce((a, b) => a + b, 0));
         if (hasComp) cells.push(...h.comp, h.comp.some(Boolean) ? { v: passRate(h.comp), s: ST.pct } : null);
+        if (showAuth) cells.push(agg.authHosts.has(name) ? { v: 'Yes', s: ST.failed } : null);
         hostRows.push(cells);
       }
       sheets.push({ name: 'Hosts', widths, rows: hostRows, freeze: true, filter: `A1:${colLetter(head.length - 1)}${hostRows.length}` });
@@ -1476,6 +1534,20 @@ function mergeWorkerMain() {
       sheets.push({
         name: 'Compliance', widths: [80, ...(anyAudit ? [30] : []), 10, 10, 17, 13, 10, 11], rows: compRows,
         freeze: true, filter: `A1:${colLetter(head.length - 1)}${compRows.length}`,
+      });
+    }
+
+    // --- Auth Failures
+    if (authList.length) {
+      const head = ['Host', 'IP Address', 'FQDN', 'OS', 'Auth Protocol', 'Port', 'User', 'Domain', 'Error', 'Plugin ID', 'Plugin Name', 'Plugin Output', 'Source Report'];
+      const authRows = [head.map(v => ({ v, s: ST.header }))];
+      for (const a of authList) {
+        authRows.push([a.host, a.ip, a.fqdn, a.os, a.parsed.protocol || a.protocol, asNumber(a.parsed.port || a.port),
+          a.parsed.user, a.parsed.domain, a.parsed.error, asNumber(a.plugin), a.name, a.output, a.source]);
+      }
+      sheets.push({
+        name: 'Auth Failures', widths: [20, 15, 28, 28, 14, 8, 18, 14, 50, 10, 45, 60, 40], rows: authRows,
+        freeze: true, filter: `A1:M${authRows.length}`,
       });
     }
 
@@ -1516,6 +1588,7 @@ function mergeWorkerMain() {
     }
     const withSummary = options.format === 'xlsx' && options.summary !== false;
     const complianceMode = options.mode === 'compliance';
+    const authIds = new Set((options.authPlugins || []).map(v => String(v).trim()).filter(Boolean));
     const out = options.format === 'xlsx' ? new XlsxOutput(sink, outCols, withSummary) : new CsvOutput(sink, outCols, options.bom);
 
     const totalBytes = sources.reduce((s, src) => s + sourceBytes(src), 0);
@@ -1561,23 +1634,42 @@ function mergeWorkerMain() {
           stats.rowsIn++;
           if (row.length !== fileCols) stats.malformed++;
 
+          const ruleMatch = () => {
+            for (let r = 0; r < fRules.length; r++) {
+              const rule = fRules[r];
+              if (rule.test(row[rule.col] || '')) {
+                stats.excluded++;
+                ruleHits[rule.index]++;
+                return true;
+              }
+            }
+            return false;
+          };
+
+          // Authentication-failure plugins are reported on their own (dashboard
+          // + "Auth Failures" sheet), stay in the findings even when
+          // informational rows are excluded, and never count as compliance
+          // checks or vulnerabilities. Explicit exclusion rules still apply.
+          const isAuth = authIds.has(cell(row, 'plugin'));
+          if (isAuth) {
+            if (ruleMatch()) return;
+            agg.addAuth({
+              host: cell(row, 'host'), ip: cell(row, 'ip'), fqdn: cell(row, 'fqdn'), os: cell(row, 'os'),
+              plugin: cell(row, 'plugin'), name: cell(row, 'name'), protocol: cell(row, 'protocol'),
+              port: cell(row, 'port'), output: cell(row, 'output'), source: src.name,
+            });
+          }
+
           // Compliance results are never "informational": a PASSED check has
           // Risk None, but dropping it would skew the pass rate.
-          const compBucket = fKey.result === -1 || options.mode === 'vulnerability' ? -1 : complianceBucket(row[fKey.result] || '');
+          const compBucket = isAuth || fKey.result === -1 || options.mode === 'vulnerability' ? -1 : complianceBucket(row[fKey.result] || '');
 
-          if (options.excludeInfo && compBucket === -1 && fKey.risk !== -1) {
+          if (options.excludeInfo && compBucket === -1 && !isAuth && fKey.risk !== -1) {
             const sev = (row[fKey.risk] || '').trim().toLowerCase();
             if (INFO_LEVELS.has(sev)) { stats.filtered++; return; }
           }
 
-          for (let r = 0; r < fRules.length; r++) {
-            const rule = fRules[r];
-            if (rule.test(row[rule.col] || '')) {
-              stats.excluded++;
-              ruleHits[rule.index]++;
-              return;
-            }
-          }
+          if (!isAuth && ruleMatch()) return;
 
           if (seen) {
             let key;
@@ -1605,7 +1697,9 @@ function mergeWorkerMain() {
 
           const hostName = cell(row, 'host');
           const h = hostName ? agg.host(hostName, cell(row, 'ip'), cell(row, 'fqdn'), cell(row, 'os')) : null;
-          if (compBucket !== -1) {
+          if (isAuth) {
+            // Counted in the auth section only.
+          } else if (compBucket !== -1) {
             agg.addCompliance(h, compBucket, cell(row, 'check'), cell(row, 'audit'));
           } else {
             const risk = cell(row, 'risk');
@@ -1618,7 +1712,7 @@ function mergeWorkerMain() {
         // them: from the Description ("<check>": [RESULT]) when present and,
         // in compliance-audit mode, from Risk and Name otherwise.
         const fillCompliance = row => {
-          if (fKey.result === -1) return;
+          if (fKey.result === -1 || authIds.has(cell(row, 'plugin'))) return;
           const hasResult = row[fKey.result] && row[fKey.result].trim();
           const hasCheck = fKey.check === -1 || (row[fKey.check] && row[fKey.check].trim());
           if (hasResult && hasCheck) return;
@@ -1696,6 +1790,7 @@ function mergeWorkerMain() {
         reports: sources.length,
         duplicates: totals.duplicates,
         excluded: totals.filtered + totals.excluded,
+        authPlugins: [...authIds],
         sources,
         perFile,
       }) : null;
@@ -1712,6 +1807,7 @@ function mergeWorkerMain() {
           uniqueHosts: agg.hosts.size,
           severity,
           compliance: agg.comp.slice(),
+          authHosts: authIds.size ? agg.authTotal : null,
           perFile,
           ruleHits,
           bytesIn: totalBytes,

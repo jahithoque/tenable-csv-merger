@@ -21,7 +21,7 @@
     optionsCard: $('options-card'), optSource: $('opt-source'), optInfo: $('opt-info'), optBom: $('opt-bom'), optBomWrap: $('opt-bom-wrap'),
     optDisk: $('opt-disk'), optDiskWrap: $('opt-disk-wrap'), optName: $('opt-name'),
     colCount: $('col-count'), colNote: $('col-note'), colChips: $('col-chips'), colSearch: $('col-search'),
-    optSummary: $('opt-summary'), optSummaryWrap: $('opt-summary-wrap'), modeHelp: $('mode-help'),
+    optSummary: $('opt-summary'), optSummaryWrap: $('opt-summary-wrap'), modeHelp: $('mode-help'), optAuth: $('opt-auth'),
     mergeBtn: $('merge-btn'), mergeHint: $('merge-hint'),
     progressCard: $('progress-card'), progressTitle: $('progress-title'), progressBar: $('progress-bar'),
     progressFill: $('progress-fill'), progressPct: $('progress-pct'), progressDetail: $('progress-detail'),
@@ -741,6 +741,7 @@
         format: outputFormat(),
         summary: el.optSummary.checked,
         mode: reportMode(),
+        authPlugins: authPluginIds(),
         bom: el.optBom.checked,
         rules: activeRules().map(r => ({ column: r.column, op: r.op, values: ruleValues(r) })),
       },
@@ -809,6 +810,7 @@
       [fmtNum(stats.excluded), 'Removed by rules'],
       [fmtNum(stats.uniqueHosts), 'Unique hosts'],
       ...(compTotal(stats) ? [[`${(passRate(stats.compliance) * 100).toFixed(1)}%`, 'Compliance pass rate']] : []),
+      ...(stats.authHosts != null ? [[fmtNum(stats.authHosts), 'Hosts with failed authentication']] : []),
       [fmtNum(stats.columns), 'Columns'],
       [fmtBytes(stats.bytesOut), 'Output size'],
       [fmtDuration(elapsed), 'Time taken'],
@@ -958,6 +960,18 @@
   } catch (_) { /* unavailable */ }
   for (const r of document.querySelectorAll('input[name="mode"]')) r.addEventListener('change', syncMode);
   el.modeHelp.textContent = MODE_HELP[reportMode()];
+
+  // Plugin IDs reported as authentication failures (default 104410).
+  const AUTH_STORAGE_KEY = 'tenable-merger.auth-plugins.v1';
+  const authPluginIds = () => el.optAuth.value.split(/[\s,;]+/).map(v => v.trim()).filter(Boolean);
+  try {
+    const saved = localStorage.getItem(AUTH_STORAGE_KEY);
+    if (saved !== null) el.optAuth.value = saved;
+  } catch (_) { /* unavailable */ }
+  el.optAuth.addEventListener('input', () => {
+    try { localStorage.setItem(AUTH_STORAGE_KEY, el.optAuth.value); } catch (_) { /* unavailable */ }
+    clearResult();
+  });
 
   loadColumns();
   loadRules();

@@ -202,6 +202,7 @@
     .format input:checked + span { background: var(--accent); color: var(--accent-ink); }
     .format input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: -2px; }
     fieldset.report-type { margin-bottom: 16px; }
+    .inline-field { margin-top: 0; max-width: 420px; }
     .mode-help { margin: 6px 0 0; color: var(--muted); font-size: 12.5px; }
     .dz-sub code { font-family: var(--mono); font-size: 12.5px; }
 
@@ -318,6 +319,14 @@
           <label><input type="radio" name="mode" value="compliance"><span>Compliance audit</span></label>
         </div>
         <p class="mode-help" id="mode-help"></p>
+      </fieldset>
+
+      <fieldset class="report-type">
+        <legend>Authentication failures</legend>
+        <label class="field inline-field">Plugin IDs to report separately
+          <input type="text" id="opt-auth" value="104410" spellcheck="false" placeholder="e.g. 104410, 21745">
+        </label>
+        <p class="mode-help">Hosts where Tenable could not log in with the provided credentials get their own dashboard section and an "Auth Failures" sheet (protocol, port, user, error). These rows are never counted as compliance checks or vulnerabilities, and are kept even when informational findings are excluded. Leave empty to turn off.</p>
       </fieldset>
 
       <div class="options-grid">

@@ -25,6 +25,10 @@ Works offline and straight from disk (`file://`).
 | **Compliance audit** | Every row is a compliance check. When a report has no explicit result (common in Tenable exports), Risk is used: **None = Passed, High = Failed, Medium = Warning / Manual check** (Critical = Failed, Low = Warning). The check name comes from the Name column. |
 
 The choice is remembered in your browser.
+
+### Authentication failures
+
+Rows from the plugin IDs in **Authentication failures** (default `104410`, *Target Credential Status by Authentication Protocol - Failure for Provided Credentials*) are reported separately: a dashboard section with the number of affected hosts and a table of protocol / port / user / error parsed from the plugin output, an **Auth Failures** sheet, and an *Auth Failed* column on the Hosts sheet. They are never counted as compliance checks or vulnerabilities, and they stay in the findings even when informational findings are excluded (an explicit exclusion rule still removes them). Add more IDs (e.g. `21745`) comma-separated, or clear the field to turn this off.
 - **`.csv` exports** from Nessus / Tenable.
 
 Inputs can be mixed freely; the output contains the union of all columns.
@@ -39,6 +43,7 @@ Inputs can be mixed freely; the output contains the union of all columns.
   | **Hosts** | Per host: IP / FQDN / OS, Critical–Info counts, Passed / Failed / Warning checks and pass rate |
   | **Vulnerabilities** | Per plugin: severity, hosts affected, occurrences, CVEs |
   | **Compliance** | Per check: Passed / Failed / Warning counts and pass rate (when compliance results exist) |
+  | **Auth Failures** | Hosts where Tenable could not log in (plugin 104410 by default): IP, FQDN, OS, auth protocol, port, user, domain, error, full plugin output, source report |
   | **Sources** | Per report: rows read / written, duplicates, exclusions, errors |
   | **Findings** | The merged rows |
 
