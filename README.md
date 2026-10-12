@@ -59,6 +59,8 @@ Inputs can be mixed freely; the output contains the union of all columns.
   | **Sources** | Per report: rows read / written, which Findings sheet holds its rows, duplicates, exclusions, auth failures, errors |
   | **Findings** | The merged rows |
 
+  Text cells keep Tenable's line breaks (wrapped, so words at line ends never run together). **Findings rows**: *Compact* shows the first two lines of each finding (full text in the formula bar or by expanding the row); *Fit full text* lets Excel size every row to its content.
+
   The summary sheets can be switched off. Findings have a bold, frozen header row with filters and numbers stored as numbers. Results larger than Excel's 1,048,576-row limit (or a single sheet's 4 GB size limit) continue on extra sheets named *Findings (2)*, *Findings (3)*, …; the Dashboard and Sources sheet say which sheet holds each report. Cells over Excel's 32,767-character limit are cut short and marked `[truncated]` (use CSV to keep full text).
 - **CSV** — optional UTF-8 BOM for Excel.
 - **Stream straight to disk** (Chrome/Edge) — output is written to the chosen file as it is produced. Other browsers get a regular download.

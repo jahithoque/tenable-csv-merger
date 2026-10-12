@@ -22,7 +22,7 @@
     optDisk: $('opt-disk'), optDiskWrap: $('opt-disk-wrap'), optName: $('opt-name'),
     colCount: $('col-count'), colNote: $('col-note'), colChips: $('col-chips'), colSearch: $('col-search'),
     optSummary: $('opt-summary'), optSummaryWrap: $('opt-summary-wrap'), modeHelp: $('mode-help'), optAuth: $('opt-auth'),
-    identityHelp: $('identity-help'),
+    identityHelp: $('identity-help'), optRowsWrap: $('opt-rows-wrap'),
     mergeBtn: $('merge-btn'), mergeHint: $('merge-hint'),
     progressCard: $('progress-card'), progressTitle: $('progress-title'), progressBar: $('progress-bar'),
     progressFill: $('progress-fill'), progressPct: $('progress-pct'), progressDetail: $('progress-detail'),
@@ -623,6 +623,7 @@
   function syncFormat() {
     el.optBomWrap.hidden = outputFormat() !== 'csv';
     el.optSummaryWrap.hidden = outputFormat() !== 'xlsx';
+    el.optRowsWrap.hidden = outputFormat() !== 'xlsx';
     el.optName.value = outputName();
     clearResult();
   }
@@ -743,6 +744,7 @@
         summary: el.optSummary.checked,
         mode: reportMode(),
         identity: targetIdentity(),
+        findingsRows: document.querySelector('input[name="rows"]:checked').value,
         authPlugins: authPluginIds(),
         bom: el.optBom.checked,
         rules: activeRules().map(r => ({ column: r.column, op: r.op, values: ruleValues(r) })),

@@ -164,7 +164,7 @@
     label.radio, label.check { display: flex; gap: 10px; align-items: flex-start; padding: 7px 0; cursor: pointer; }
     label.radio input, label.check input { margin-top: 3px; accent-color: var(--accent); }
     label.radio small, label.check small { display: block; color: var(--muted); font-size: 12.5px; }
-    label.field { display: grid; gap: 4px; margin-top: 8px; color: var(--muted); font-size: 12.5px; font-weight: 600; }
+    .field { display: grid; gap: 4px; margin-top: 8px; color: var(--muted); font-size: 12.5px; font-weight: 600; }
     label.field input {
       font: inherit; font-family: var(--mono); font-size: 13px; color: var(--text);
       background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; width: 100%;
@@ -203,6 +203,7 @@
     .format input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: -2px; }
     fieldset.report-type { margin-bottom: 16px; }
     .inline-field { margin-top: 0; max-width: 420px; }
+    .field-help { display: block; font-weight: 400; color: var(--muted); }
     .mode-help { margin: 6px 0 0; color: var(--muted); font-size: 12.5px; }
     .dz-sub code { font-family: var(--mono); font-size: 12.5px; }
 
@@ -365,6 +366,13 @@
             <span><strong>Add UTF-8 BOM</strong><small>Helps Excel display non-ASCII characters correctly</small></span></label>
           <label class="check" id="opt-disk-wrap" hidden><input type="checkbox" id="opt-disk" checked>
             <span><strong>Stream straight to disk</strong><small>Asks where to save first; best for very large merges</small></span></label>
+          <div class="field" id="opt-rows-wrap">Findings rows
+            <div class="format" role="radiogroup" aria-label="Findings row height">
+              <label><input type="radio" name="rows" value="compact" checked><span>Compact</span></label>
+              <label><input type="radio" name="rows" value="fit"><span>Fit full text</span></label>
+            </div>
+            <small class="field-help">Compact shows the first two lines of each finding (full text in the formula bar, or expand the row). Fit full text makes Excel size every row to its description and output, which gives a much longer sheet.</small>
+          </div>
           <label class="field">File name
             <input type="text" id="opt-name" value="merged_tenable_report.xlsx" spellcheck="false">
           </label>

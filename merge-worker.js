@@ -972,6 +972,17 @@ function mergeWorkerMain() {
     return n;
   }
 
+  // Wrapped lines needed to show text in a column `width` characters wide.
+  function wrappedLines(text, width) {
+    let lines = 0;
+    for (const part of text.split('\n')) lines += Math.max(1, Math.ceil(part.length / Math.max(width, 4)));
+    return lines;
+  }
+
+  // Two lines of 10pt Arial, so a compact findings row shows the start of
+  // the description without a cut-off third line.
+  const COMPACT_ROW_HEIGHT = 26;
+
   const findingsSheetName = i => (i === 0 ? 'Findings' : `Findings (${i + 1})`);
 
   function colLetter(i) {
@@ -1050,8 +1061,11 @@ function mergeWorkerMain() {
       xf({ font: 9, fill: 12, bd: 2, h: 'center' }),                    // 24 KPI value, good
       xf({ font: 6, fill: 12, bd: 2, h: 'center', num: 10 }),           // 25 KPI percent
       xf({ font: 3, h: 'center' }),                                     // 26 subtitle
-      xf({ bd: 1, h: 'left', indent: 1 }),                              // 27 findings text
-      xf({ bd: 1, h: 'center' }),                                       // 28 findings number
+      // Findings cells wrap so embedded line breaks render as breaks (unwrapped,
+      // Excel draws them as nothing and glues words together). Top-aligned so
+      // a compact row shows the first line.
+      xf({ bd: 1, h: 'left', v: 'top', wrap: true, indent: 1 }),       // 27 findings text
+      xf({ bd: 1, h: 'center', v: 'top' }),                             // 28 findings number
     ];
     return XML_DECL + `<styleSheet xmlns="${NS_MAIN}">` +
       `<fonts count="${fonts.length}">${fonts.join('')}</fonts>` +
@@ -1125,8 +1139,9 @@ function mergeWorkerMain() {
   }
 
   class XlsxOutput {
-    constructor(sink, cols, withSummary) {
+    constructor(sink, cols, withSummary, fitRows) {
       this.sink = sink;
+      this.fitRows = fitRows;   // true: let Excel size rows to the full text
       this.zip = new ZipWriter(sink);
       this.mime = XLSX_MIME;
       this.cols = cols;
@@ -1152,8 +1167,10 @@ function mergeWorkerMain() {
       return `<c r="${ref}"${style ? ` s="${style}"` : ''} t="inlineStr"><is><t xml:space="preserve">${xmlEscape(v)}</t></is></c>`;
     }
 
-    rowXml(values, r, style) {
-      let xml = `<row r="${r}">`;
+    // Compact findings rows get an explicit height; otherwise Excel auto-fits
+    // every wrapped row to its full text.
+    rowXml(values, r, style, height = this.fitRows ? 0 : COMPACT_ROW_HEIGHT) {
+      let xml = `<row r="${r}"${height ? ` ht="${height}" customHeight="1"` : ''}>`;
       for (let i = 0; i < values.length; i++) xml += this.cellXml(values[i], this.letters[i] + r, style);
       return xml + '</row>';
     }
@@ -1187,7 +1204,7 @@ function mergeWorkerMain() {
 
     sheetName(i) { return findingsSheetName(i); }
 
-    sheetHead({ widths, freeze, selected, gridlines = true, print = false, rowHeight = 20 }) {
+    sheetHead({ widths, freeze, selected, gridlines = true, print = false, rowHeight = 20, fit = false }) {
       const cols = widths.map((w, j) => `<col min="${j + 1}" max="${j + 1}" width="${w}" customWidth="1"/>`).join('');
       return XML_DECL + `<worksheet xmlns="${NS_MAIN}" xmlns:r="${NS_REL}">` +
         (print ? '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>' : '') +
@@ -1195,7 +1212,8 @@ function mergeWorkerMain() {
         (freeze
           ? '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/>'
           : '<selection activeCell="A1" sqref="A1"/>') +
-        `</sheetView></sheetViews><sheetFormatPr defaultRowHeight="${rowHeight}" customHeight="1"/>` +
+        `</sheetView></sheetViews>` +
+        (fit ? '<sheetFormatPr defaultRowHeight="15"/>' : `<sheetFormatPr defaultRowHeight="${rowHeight}" customHeight="1"/>`) +
         `${cols ? `<cols>${cols}</cols>` : ''}<sheetData>`;
     }
 
@@ -1205,8 +1223,8 @@ function mergeWorkerMain() {
       stream.index = i;
       this.stream = stream;
       const widths = this.cols.map(c => COLUMN_WIDTHS[c.toLowerCase()] || 16);
-      await stream.write(this.sheetHead({ widths, freeze: true, selected: i === 0 && !this.withSummary }) +
-        this.rowXml(this.cols, 1, ST.header).replace('<row r="1">', '<row r="1" ht="24" customHeight="1">'));
+      await stream.write(this.sheetHead({ widths, freeze: true, selected: i === 0 && !this.withSummary, fit: this.fitRows }) +
+        this.rowXml(this.cols, 1, ST.header, 24));
     }
 
     async endSheet() {
@@ -1243,7 +1261,7 @@ function mergeWorkerMain() {
           let lines = 1;
           cells.forEach((cell, c) => {
             if (cell && typeof cell === 'object' && cell.s === ST.td && typeof cell.v === 'string') {
-              lines = Math.max(lines, Math.ceil(cell.v.length / ((spec.widths[c] || 10) * 1.25 - 2)));
+              lines = Math.max(lines, wrappedLines(cell.v, (spec.widths[c] || 10) * 1.25 - 2));
             }
           });
           if (lines > 1) ht = Math.min(lines, 10) * 15 + 6;
@@ -1502,7 +1520,7 @@ function mergeWorkerMain() {
         // Merged cells don't auto-fit, so size wrapped text explicitly.
         if (typeof it.v === 'string' && WRAPPED.has(it.s)) {
           // Column width is measured in digit widths; text averages ~0.8 of that.
-          lines = Math.max(lines, Math.ceil(it.v.length / (span * COL_WIDTH * 1.25 - 2)));
+          lines = Math.max(lines, wrappedLines(it.v, span * COL_WIDTH * 1.25 - 2));
         }
       }
       rows.push(cells);
@@ -1798,7 +1816,9 @@ function mergeWorkerMain() {
     // report). Used for duplicate removal and every per-target summary.
     const identity = ['hostip', 'report'].includes(options.identity) ? options.identity : 'host';
     const authIds = new Set((options.authPlugins || []).map(v => String(v).trim()).filter(Boolean));
-    const out = options.format === 'xlsx' ? new XlsxOutput(sink, outCols, withSummary) : new CsvOutput(sink, outCols, options.bom);
+    const out = options.format === 'xlsx'
+      ? new XlsxOutput(sink, outCols, withSummary, options.findingsRows === 'fit')
+      : new CsvOutput(sink, outCols, options.bom);
 
     const totalBytes = sources.reduce((s, src) => s + sourceBytes(src), 0);
     let bytesDone = 0;
