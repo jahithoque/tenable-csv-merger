@@ -19,6 +19,7 @@ Works offline and straight from disk (`file://`).
   - *Remove identical rows* (default)
   - *Remove repeated findings* — same Plugin ID + Host + Protocol + Port + CVE, keeping the first seen
   - *Keep everything*
+- **Exclude findings by cell value** — add rules on any column, e.g. *Plugin ID is one of `19506, 10287, 11219-11220`*. Conditions: *is one of* (with numeric ranges), *is not one of* (keep only), *contains*, *matches regex*. Rows matching any rule are dropped, with per-rule counts in the summary. Rules are remembered in your browser.
 - **Optional extras** — `Source File` column, exclude informational (Risk = None) findings, UTF-8 BOM for Excel.
 - **Summary** — rows read/written, duplicates removed, unique hosts, severity breakdown, and a warning when the result exceeds Excel's 1,048,576-row limit.
 

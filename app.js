@@ -14,7 +14,7 @@
 
   const $ = id => document.getElementById(id);
   const el = {
-    dropzone: $('dropzone'), fileInput: $('file-input'), folderInput: $('folder-input'),
+    dropzone: $('dropzone'),
     pickFiles: $('pick-files'), pickFolder: $('pick-folder'),
     filesCard: $('files-card'), fileCount: $('file-count'), fileRows: $('file-rows'), fileNotices: $('file-notices'),
     sortFiles: $('sort-files'), clearFiles: $('clear-files'),
@@ -27,7 +27,14 @@
     progressFile: $('progress-file'), cancelBtn: $('cancel-btn'),
     resultCard: $('result-card'), resultSaved: $('result-saved'), downloadBtn: $('download-btn'),
     stats: $('stats'), severity: $('severity'), resultNotices: $('result-notices'),
+    ruleResults: $('rule-results'), rulesList: $('rules-list'), addRule: $('add-rule'), addPluginRule: $('add-plugin-rule'),
   };
+
+  // Set initial visibility from script too, so a browser or viewer that drops
+  // the HTML `hidden` attributes still starts with only the drop zone showing.
+  for (const card of [el.filesCard, el.optionsCard, el.progressCard, el.resultCard, el.resultSaved, el.optDiskWrap]) {
+    card.hidden = true;
+  }
 
   const state = {
     entries: [],              // { id, file, status, headers, recognized, error, row, merged }
@@ -38,6 +45,8 @@
     merging: false,
     mergeWorker: null,
     resultUrl: null,
+    rules: [],                // { id, column, op, text }
+    nextRuleId: 1,
   };
 
   // The worker source lives in merge-worker.js as a plain function so it can
@@ -148,15 +157,24 @@
     return out;
   }
 
-  el.pickFiles.addEventListener('click', e => { e.stopPropagation(); el.fileInput.click(); });
-  el.pickFolder.addEventListener('click', e => { e.stopPropagation(); el.folderInput.click(); });
-  el.dropzone.addEventListener('click', () => el.fileInput.click());
-  el.dropzone.addEventListener('keydown', e => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el.fileInput.click(); }
-  });
-  for (const input of [el.fileInput, el.folderInput]) {
-    input.addEventListener('change', () => { addFiles([...input.files]); input.value = ''; });
+  // The file inputs are created on demand and never attached to the page, so
+  // the native "Browse… / No file selected" controls can't leak into the layout.
+  function openPicker(folder) {
+    if (state.merging) return;
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    if (folder) input.webkitdirectory = true;
+    else input.accept = '.csv,text/csv';
+    input.addEventListener('change', () => addFiles([...input.files]));
+    input.click();
   }
+  el.pickFiles.addEventListener('click', e => { e.stopPropagation(); openPicker(false); });
+  el.pickFolder.addEventListener('click', e => { e.stopPropagation(); openPicker(true); });
+  el.dropzone.addEventListener('click', () => openPicker(false));
+  el.dropzone.addEventListener('keydown', e => {
+    if (e.target === el.dropzone && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openPicker(false); }
+  });
 
   let dragDepth = 0;
   document.addEventListener('dragenter', e => { e.preventDefault(); dragDepth++; el.dropzone.classList.add('over'); });
@@ -311,24 +329,35 @@
     const totalSize = state.entries.reduce((s, x) => s + x.file.size, 0);
     el.fileCount.textContent = n ? `${fmtNum(n)} · ${fmtBytes(totalSize)}` : '';
 
+    const before = state.columns.map(c => c.name).join('\u0000');
     state.columns = computeColumns();
     renderColumns();
+    // Rebuild rule dropdowns only when the column list changed.
+    if (state.columns.map(c => c.name).join('\u0000') !== before) renderRules();
+    else updateRuleStatus();
 
+    for (const b of [el.sortFiles, el.clearFiles, el.pickFiles, el.pickFolder, el.addRule, el.addPluginRule]) b.disabled = state.merging;
+    for (const entry of state.entries) entry.row.querySelector('.remove').disabled = state.merging;
+  }
+
+  function refreshMergeButton() {
+    const n = state.entries.length;
     const scanning = state.entries.filter(x => x.status === 'scanning').length;
     const ready = state.entries.filter(x => x.status === 'ready');
     const errors = state.entries.filter(x => x.status === 'error').length;
     const included = state.columns.filter(c => !state.excludedCols.has(c.key)).length;
 
-    el.mergeBtn.disabled = state.merging || scanning > 0 || ready.length === 0 || included === 0;
+    const badRules = state.rules.filter(ruleError).length;
+    el.mergeBtn.disabled = state.merging || scanning > 0 || ready.length === 0 || included === 0 || badRules > 0;
     const parts = [];
     if (scanning) parts.push(`Reading headers… ${fmtNum(n - scanning)} / ${fmtNum(n)}`);
     else if (ready.length) parts.push(`${fmtNum(ready.length)} report${ready.length > 1 ? 's' : ''} ready (${fmtBytes(ready.reduce((s, x) => s + x.file.size, 0))})`);
     if (errors) parts.push(`${fmtNum(errors)} unreadable, will be skipped`);
     if (!included && state.columns.length) parts.push('select at least one column');
+    if (badRules) parts.push('fix the invalid exclusion rule');
+    const rules = activeRules().length;
+    if (rules && !badRules) parts.push(`${rules} exclusion rule${rules > 1 ? 's' : ''} active`);
     el.mergeHint.textContent = parts.join(' · ');
-
-    for (const b of [el.sortFiles, el.clearFiles, el.pickFiles, el.pickFolder]) b.disabled = state.merging;
-    for (const entry of state.entries) entry.row.querySelector('.remove').disabled = state.merging;
   }
 
   el.colsAll.addEventListener('click', () => { state.excludedCols.clear(); clearResult(); refresh(); });
@@ -336,6 +365,143 @@
     for (const c of state.columns) state.excludedCols.add(c.key);
     clearResult();
     refresh();
+  });
+
+  // ---------------------------------------------------------------------
+  // Exclusion rules
+  // ---------------------------------------------------------------------
+  const RULE_OPS = [
+    ['in', 'is one of', 'e.g. 19506, 10287, 11219 or a range like 10000-10500'],
+    ['notin', 'is not one of', 'Keeps only these values, e.g. Critical, High'],
+    ['contains', 'contains', 'One phrase per line, e.g. SSL Certificate'],
+    ['regex', 'matches regex', 'One pattern per line, e.g. ^CVE-2019-'],
+  ];
+  const RULES_STORAGE_KEY = 'tenable-merger.rules.v1';
+
+  function ruleValues(rule) {
+    // Lists split on commas or new lines; free text splits on new lines only.
+    const parts = rule.op === 'in' || rule.op === 'notin' ? rule.text.split(/[,\n]/) : rule.text.split('\n');
+    return parts.map(v => v.trim()).filter(Boolean);
+  }
+
+  function ruleError(rule) {
+    if (rule.op !== 'regex') return null;
+    for (const v of ruleValues(rule)) {
+      try { new RegExp(v, 'i'); } catch (err) { return `Invalid pattern “${v}”`; }
+    }
+    return null;
+  }
+
+  // Rules with no values are ignored rather than blocking the merge.
+  const activeRules = () => state.rules.filter(r => r.column && ruleValues(r).length);
+
+  function saveRules() {
+    try {
+      localStorage.setItem(RULES_STORAGE_KEY,
+        JSON.stringify(state.rules.map(({ column, op, text }) => ({ column, op, text }))));
+    } catch (_) { /* storage unavailable (private mode, file:// restrictions) */ }
+  }
+
+  function loadRules() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(RULES_STORAGE_KEY) || '[]');
+      for (const r of saved) {
+        if (r && typeof r.column === 'string' && RULE_OPS.some(o => o[0] === r.op)) {
+          state.rules.push({ id: state.nextRuleId++, column: r.column, op: r.op, text: String(r.text || '') });
+        }
+      }
+    } catch (_) { /* ignore corrupt or unavailable storage */ }
+  }
+
+  function addRule(column, op = 'in') {
+    const fallback = state.columns.find(c => c.key === 'plugin id') || state.columns[0];
+    state.rules.push({ id: state.nextRuleId++, column: column || (fallback ? fallback.name : 'Plugin ID'), op, text: '' });
+    saveRules();
+    renderRules();
+    clearResult();
+    refresh();
+    const areas = el.rulesList.querySelectorAll('textarea');
+    if (areas.length) areas[areas.length - 1].focus();
+  }
+
+  function renderRules() {
+    el.rulesList.textContent = '';
+    const colNames = state.columns.map(c => c.name);
+    for (const rule of state.rules) {
+      const row = document.createElement('div');
+      row.className = 'rule';
+
+      const colSel = document.createElement('select');
+      colSel.setAttribute('aria-label', 'Column');
+      const names = colNames.some(n => n.toLowerCase() === rule.column.toLowerCase()) ? colNames : [rule.column, ...colNames];
+      for (const name of names) colSel.add(new Option(name, name, false, name.toLowerCase() === rule.column.toLowerCase()));
+      colSel.addEventListener('change', () => { rule.column = colSel.value; saveRules(); clearResult(); updateRuleStatus(); });
+
+      const opSel = document.createElement('select');
+      opSel.setAttribute('aria-label', 'Condition');
+      for (const [value, label] of RULE_OPS) opSel.add(new Option(label, value, false, value === rule.op));
+
+      const area = document.createElement('textarea');
+      area.rows = 2;
+      area.spellcheck = false;
+      area.value = rule.text;
+      area.setAttribute('aria-label', 'Values');
+
+      const meta = document.createElement('div');
+      meta.className = 'rule-meta';
+
+      const setPlaceholder = () => { area.placeholder = RULE_OPS.find(o => o[0] === rule.op)[2]; };
+      setPlaceholder();
+      opSel.addEventListener('change', () => { rule.op = opSel.value; setPlaceholder(); saveRules(); clearResult(); updateRuleStatus(); });
+      area.addEventListener('input', () => { rule.text = area.value; saveRules(); clearResult(); updateRuleStatus(); });
+
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'remove';
+      del.textContent = '×';
+      del.setAttribute('aria-label', 'Remove rule');
+      del.addEventListener('click', () => {
+        state.rules = state.rules.filter(r => r !== rule);
+        saveRules();
+        renderRules();
+        clearResult();
+        refresh();
+      });
+
+      const fields = document.createElement('div');
+      fields.className = 'rule-fields';
+      fields.append(colSel, opSel, area, del);
+      row.append(fields, meta);
+      rule.metaEl = meta;
+      el.rulesList.appendChild(row);
+    }
+    updateRuleStatus();
+  }
+
+  // Updates per-rule hints and the merge button without rebuilding inputs
+  // (which would steal focus while typing).
+  function updateRuleStatus() {
+    const ready = state.entries.filter(x => x.status === 'ready');
+    for (const rule of state.rules) {
+      if (!rule.metaEl) continue;
+      const err = ruleError(rule);
+      const n = ruleValues(rule).length;
+      const key = rule.column.toLowerCase();
+      const missing = ready.filter(x => !x.headers.some(h => h.toLowerCase() === key)).length;
+      rule.metaEl.className = 'rule-meta' + (err ? ' err' : '');
+      let text = err || (n ? `${n} value${n > 1 ? 's' : ''}` : 'No values yet; this rule is ignored');
+      if (!err && missing && ready.length) {
+        text += ` · column not in ${missing} of ${ready.length} report${ready.length > 1 ? 's' : ''} (rule skipped there)`;
+      }
+      rule.metaEl.textContent = text;
+    }
+    refreshMergeButton();
+  }
+
+  el.addRule.addEventListener('click', () => addRule());
+  el.addPluginRule.addEventListener('click', () => {
+    const col = state.columns.find(c => c.key === 'plugin id' || c.key === 'plugin');
+    addRule(col ? col.name : 'Plugin ID', 'in');
   });
 
   // ---------------------------------------------------------------------
@@ -379,6 +545,7 @@
     setProgress(0, 0, entries[0], 0, Date.now());
     el.progressCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
+    const sentRules = activeRules().map(r => ({ column: r.column, op: r.op, n: ruleValues(r).length }));
     const startedAt = Date.now();
     const totalBytes = entries.reduce((s, x) => s + x.file.size, 0);
     const worker = createWorker();
@@ -431,7 +598,7 @@
         }
         finish();
         el.progressCard.hidden = true;
-        showResult(m.stats, m.blob, savedTo, entries, Date.now() - startedAt);
+        showResult(m.stats, m.blob, savedTo, entries, Date.now() - startedAt, sentRules);
       } else if (m.type === 'cancelled') {
         finish();
         el.progressCard.hidden = true;
@@ -459,6 +626,7 @@
         addSource: el.optSource.checked,
         excludeInfo: el.optInfo.checked,
         bom: el.optBom.checked,
+        rules: activeRules().map(r => ({ column: r.column, op: r.op, values: ruleValues(r) })),
       },
     });
   }
@@ -508,7 +676,7 @@
     el.resultNotices.textContent = '';
   }
 
-  function showResult(stats, blob, savedTo, entries, elapsed) {
+  function showResult(stats, blob, savedTo, entries, elapsed, rules) {
     el.resultCard.hidden = false;
     const name = outputName();
     if (blob) state.resultUrl = URL.createObjectURL(blob);
@@ -522,6 +690,7 @@
       [fmtNum(stats.rowsOut), 'Rows written'],
       [fmtNum(stats.duplicates), 'Duplicates removed'],
       [fmtNum(stats.filtered), 'Info rows excluded'],
+      [fmtNum(stats.excluded), 'Removed by rules'],
       [fmtNum(stats.uniqueHosts), 'Unique hosts'],
       [fmtNum(stats.columns), 'Columns'],
       [fmtBytes(stats.bytesOut), 'Output size'],
@@ -538,6 +707,20 @@
     }
 
     renderSeverity(stats.severity);
+
+    el.ruleResults.textContent = '';
+    if (rules.length) {
+      const opLabel = op => RULE_OPS.find(o => o[0] === op)[1];
+      const h = document.createElement('h3');
+      h.textContent = 'Exclusion rules';
+      const ul = document.createElement('ul');
+      rules.forEach((r, i) => {
+        const li = document.createElement('li');
+        li.textContent = `${r.column} ${opLabel(r.op)} ${r.n} value${r.n > 1 ? 's' : ''}: removed ${fmtNum(stats.ruleHits[i])} row${stats.ruleHits[i] === 1 ? '' : 's'}`;
+        ul.appendChild(li);
+      });
+      el.ruleResults.append(h, ul);
+    }
 
     if (stats.rowsOut > EXCEL_MAX_ROWS) {
       notice(el.resultNotices, `The merged file has ${fmtNum(stats.rowsOut)} rows. Excel can only open the first ${fmtNum(EXCEL_MAX_ROWS)}. Try excluding informational findings, or open it in a tool without that limit.`);
@@ -607,5 +790,7 @@
     if (state.merging) { e.preventDefault(); e.returnValue = ''; }
   });
 
+  loadRules();
+  renderRules();
   refresh();
 })();

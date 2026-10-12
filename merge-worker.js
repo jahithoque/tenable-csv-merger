@@ -194,6 +194,50 @@ function mergeWorkerMain() {
     return -1;
   }
 
+  // Exclusion rules: { column, op, values: string[] }. Returns matchers
+  // whose test(cell) is true when the row should be dropped.
+  function compileRules(rules) {
+    return (rules || []).map((rule, i) => {
+      const values = rule.values.map(v => v.trim()).filter(Boolean);
+      let test;
+      if (rule.op === 'in' || rule.op === 'notin') {
+        const set = new Set();
+        const ranges = [];
+        for (const v of values) {
+          const m = /^(\d+)\s*-\s*(\d+)$/.exec(v);
+          if (m) ranges.push([Math.min(+m[1], +m[2]), Math.max(+m[1], +m[2])]);
+          else set.add(v.toLowerCase());
+        }
+        const isIn = cell => {
+          const c = cell.trim().toLowerCase();
+          if (set.has(c)) return true;
+          if (ranges.length && /^\d+$/.test(c)) {
+            const n = +c;
+            for (const [a, b] of ranges) if (n >= a && n <= b) return true;
+          }
+          return false;
+        };
+        test = rule.op === 'in' ? isIn : cell => !isIn(cell);
+      } else if (rule.op === 'contains') {
+        const needles = values.map(v => v.toLowerCase());
+        test = cell => {
+          const c = cell.toLowerCase();
+          for (const n of needles) if (c.indexOf(n) !== -1) return true;
+          return false;
+        };
+      } else if (rule.op === 'regex') {
+        const res = values.map(v => new RegExp(v, 'i'));
+        test = cell => {
+          for (const re of res) if (re.test(cell)) return true;
+          return false;
+        };
+      } else {
+        throw new Error('Unknown rule operator: ' + rule.op);
+      }
+      return { index: i, key: rule.column.trim().toLowerCase(), test };
+    });
+  }
+
   function csvEscape(v) {
     return '"' + (v.indexOf('"') === -1 ? v : v.replace(/"/g, '""')) + '"';
   }
@@ -321,7 +365,9 @@ function mergeWorkerMain() {
     const seen = options.dedupe === 'none' ? null : new HashSet64();
     const hosts = new Set();
     const severity = Object.create(null);
-    const totals = { rowsIn: 0, rowsOut: 0, duplicates: 0, filtered: 0, malformed: 0 };
+    const totals = { rowsIn: 0, rowsOut: 0, duplicates: 0, filtered: 0, excluded: 0, malformed: 0 };
+    const rules = compileRules(options.rules);
+    const ruleHits = rules.map(() => 0);
     const perFile = [];
 
     const outColIndex = new Map(outCols.map((c, i) => [c.toLowerCase(), i]));
@@ -333,12 +379,13 @@ function mergeWorkerMain() {
       for (let fi = 0; fi < files.length; fi++) {
         if (cancelled) break;
         const file = files[fi];
-        const stats = { rowsIn: 0, rowsOut: 0, duplicates: 0, filtered: 0, malformed: 0, error: null };
+        const stats = { rowsIn: 0, rowsOut: 0, duplicates: 0, filtered: 0, excluded: 0, malformed: 0, error: null };
         let map = null;        // file column index -> output column index (or -1)
         let fileCols = 0;
         // Key columns come from the file itself so dedupe/filter still work
         // when the user has deselected those columns from the output.
         let fKey = null;
+        let fRules = null;     // rules whose column exists in this file
         const blank = new Array(outCols.length);
 
         const parser = new CsvStreamParser(row => {
@@ -351,6 +398,10 @@ function mergeWorkerMain() {
             });
             fKey = {};
             for (const k of Object.keys(KEY_ALIASES)) fKey[k] = findColumn(headers, KEY_ALIASES[k]);
+            const lower = headers.map(h => h.toLowerCase());
+            fRules = rules
+              .map(r => ({ ...r, col: lower.indexOf(r.key) }))
+              .filter(r => r.col !== -1);
             return;
           }
 
@@ -360,6 +411,15 @@ function mergeWorkerMain() {
           if (options.excludeInfo && fKey.risk !== -1) {
             const sev = (row[fKey.risk] || '').trim().toLowerCase();
             if (INFO_LEVELS.has(sev)) { stats.filtered++; return; }
+          }
+
+          for (let r = 0; r < fRules.length; r++) {
+            const rule = fRules[r];
+            if (rule.test(row[rule.col] || '')) {
+              stats.excluded++;
+              ruleHits[rule.index]++;
+              return;
+            }
           }
 
           const out = blank.slice();
@@ -420,7 +480,7 @@ function mergeWorkerMain() {
         }
 
         await sink.flush();
-        for (const k of ['rowsIn', 'rowsOut', 'duplicates', 'filtered', 'malformed']) totals[k] += stats[k];
+        for (const k of ['rowsIn', 'rowsOut', 'duplicates', 'filtered', 'excluded', 'malformed']) totals[k] += stats[k];
         perFile.push(stats);
         self.postMessage({ type: 'fileDone', fileIndex: fi, stats });
       }
@@ -441,6 +501,7 @@ function mergeWorkerMain() {
           uniqueHosts: hosts.size,
           severity,
           perFile,
+          ruleHits,
           bytesIn: totalBytes,
           bytesOut: blob ? blob.size : null,
         },
@@ -477,5 +538,5 @@ function mergeWorkerMain() {
   };
 
   // Exposed for the Node test harness; harmless in the browser.
-  self.__mergeInternals = { CsvStreamParser, HashSet64, hash64, readHeader };
+  self.__mergeInternals = { CsvStreamParser, HashSet64, hash64, readHeader, compileRules };
 }

@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tenable CSV Merger</title>
+  <!-- Inline so panels stay hidden even if styles.css is slow or blocked. -->
+  <style>[hidden] { display: none !important; }</style>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -29,8 +31,6 @@
           <button type="button" class="btn" id="pick-folder">Choose folder</button>
         </div>
       </div>
-      <input type="file" id="file-input" accept=".csv,text/csv" multiple hidden>
-      <input type="file" id="folder-input" webkitdirectory multiple hidden>
     </section>
 
     <section class="card" id="files-card" hidden>
@@ -80,6 +80,16 @@
         </fieldset>
       </div>
 
+      <fieldset class="rules">
+        <legend>Exclude findings</legend>
+        <p class="rules-intro">Rows matching <strong>any</strong> rule are left out of the merged file. Values are case-insensitive.</p>
+        <div id="rules-list"></div>
+        <div class="rules-tools">
+          <button type="button" class="btn small" id="add-rule">+ Add rule</button>
+          <button type="button" class="btn ghost small" id="add-plugin-rule">+ Exclude Plugin IDs</button>
+        </div>
+      </fieldset>
+
       <details class="columns" id="columns-panel">
         <summary>
           <span>Columns <span class="count" id="col-count"></span></span>
@@ -122,6 +132,7 @@
       <p class="result-saved" id="result-saved" hidden></p>
       <div class="stats" id="stats"></div>
       <div class="severity" id="severity"></div>
+      <div class="rule-results" id="rule-results"></div>
       <div id="result-notices"></div>
     </section>
   </main>
