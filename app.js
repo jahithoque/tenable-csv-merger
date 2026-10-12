@@ -18,7 +18,7 @@
     pickFiles: $('pick-files'), pickFolder: $('pick-folder'),
     filesCard: $('files-card'), fileCount: $('file-count'), fileRows: $('file-rows'), fileNotices: $('file-notices'),
     sortFiles: $('sort-files'), clearFiles: $('clear-files'),
-    optionsCard: $('options-card'), optSource: $('opt-source'), optInfo: $('opt-info'), optBom: $('opt-bom'),
+    optionsCard: $('options-card'), optSource: $('opt-source'), optInfo: $('opt-info'), optBom: $('opt-bom'), optBomWrap: $('opt-bom-wrap'),
     optDisk: $('opt-disk'), optDiskWrap: $('opt-disk-wrap'), optName: $('opt-name'),
     colCount: $('col-count'), colNote: $('col-note'), colChips: $('col-chips'), colsAll: $('cols-all'), colsNone: $('cols-none'),
     mergeBtn: $('merge-btn'), mergeHint: $('merge-hint'),
@@ -90,6 +90,7 @@
     if (m.type !== 'scanResult') return;
     const entry = state.entries.find(x => x.id === m.id);
     if (!entry) return; // removed while scanning
+    if (m.children) { expandArchive(entry, m); return; }
     if (m.error) {
       entry.status = 'error';
       entry.error = m.error;
@@ -102,22 +103,62 @@
     scheduleRefresh();
   };
 
+  // Replaces a scanned .zip row with one row per .nessus/.csv inside it.
+  function expandArchive(zip, m) {
+    let dup = 0;
+    const kids = [];
+    // Children carry their own fingerprints, so the archive's can go: a
+    // re-added copy then expands again but its duplicate reports are skipped.
+    state.fingerprints.delete(zip.fp);
+    for (const c of m.children) {
+      const fp = `${zip.fp}>${c.name}`;
+      if (state.fingerprints.has(fp)) { dup++; continue; }
+      state.fingerprints.add(fp);
+      kids.push({
+        id: state.nextId++, file: zip.file, zipEntry: c.entry, kind: c.kind,
+        name: `${zip.name} › ${c.name}`, size: c.size, fp, merged: null,
+        status: c.error ? 'error' : 'ready', error: c.error, headers: c.headers, recognized: c.recognized,
+      });
+    }
+    const notes = [];
+    if (m.nested) notes.push(`${fmtNum(m.nested)} nested archive${m.nested > 1 ? 's' : ''} skipped`);
+    if (dup) notes.push(`${fmtNum(dup)} report${dup > 1 ? 's' : ''} already in the list`);
+    if (notes.length) notice(el.fileNotices, `${zip.name}: ${notes.join('; ')}.`);
+
+    if (!kids.length) {
+      zip.status = 'error';
+      zip.error = dup ? 'All reports inside are already in the list' : 'No .nessus or .csv files inside';
+      renderRow(zip);
+    } else {
+      state.entries.splice(state.entries.indexOf(zip), 1, ...kids);
+      const frag = document.createDocumentFragment();
+      for (const kid of kids) frag.appendChild(buildRow(kid));
+      zip.row.replaceWith(frag);
+      renumber();
+    }
+    scheduleRefresh();
+  }
+
   function addFiles(fileList) {
     if (state.merging) return;
     const fresh = [];
     let skippedType = 0, skippedDup = 0;
     for (const file of fileList) {
-      if (!/\.csv$/i.test(file.name)) { skippedType++; continue; }
-      const fp = `${file.webkitRelativePath || file.name}|${file.size}|${file.lastModified}`;
+      const kind = (/\.(csv|nessus|zip)$/i.exec(file.name) || [])[1];
+      if (!kind) { skippedType++; continue; }
+      const name = file.webkitRelativePath || file.name;
+      const fp = `${name}|${file.size}|${file.lastModified}`;
       if (state.fingerprints.has(fp)) { skippedDup++; continue; }
       state.fingerprints.add(fp);
-      const entry = { id: state.nextId++, file, fp, status: 'scanning', merged: null };
+      const entry = {
+        id: state.nextId++, file, kind: kind.toLowerCase(), name, size: file.size, fp, status: 'scanning', merged: null,
+      };
       state.entries.push(entry);
       fresh.push(entry);
     }
 
     el.fileNotices.textContent = '';
-    if (skippedType) notice(el.fileNotices, `Skipped ${fmtNum(skippedType)} non-CSV file${skippedType > 1 ? 's' : ''}.`);
+    if (skippedType) notice(el.fileNotices, `Skipped ${fmtNum(skippedType)} file${skippedType > 1 ? 's' : ''} that ${skippedType > 1 ? 'are' : 'is'} not .nessus, .csv or .zip.`);
     if (skippedDup) notice(el.fileNotices, `Skipped ${fmtNum(skippedDup)} file${skippedDup > 1 ? 's' : ''} already in the list.`);
     if (!fresh.length) { scheduleRefresh(); return; }
 
@@ -165,7 +206,7 @@
     input.type = 'file';
     input.multiple = true;
     if (folder) input.webkitdirectory = true;
-    else input.accept = '.csv,text/csv';
+    else input.accept = '.nessus,.csv,.zip,text/csv,application/zip';
     input.addEventListener('change', () => addFiles([...input.files]));
     input.click();
   }
@@ -201,9 +242,9 @@
     tr.innerHTML = '<td class="num idx"></td><td class="name"></td><td class="num size"></td>' +
       '<td class="num cols"></td><td class="st"></td><td class="num merged"></td>' +
       '<td><button type="button" class="remove" aria-label="Remove">×</button></td>';
-    tr.querySelector('.name').textContent = entry.file.webkitRelativePath || entry.file.name;
-    tr.querySelector('.name').title = entry.file.webkitRelativePath || entry.file.name;
-    tr.querySelector('.size').textContent = fmtBytes(entry.file.size);
+    tr.querySelector('.name').textContent = entry.name;
+    tr.querySelector('.name').title = entry.name;
+    tr.querySelector('.size').textContent = fmtBytes(entry.size);
     tr.querySelector('.remove').addEventListener('click', () => removeEntry(entry));
     entry.row = tr;
     renderRow(entry);
@@ -215,7 +256,7 @@
     if (!tr) return;
     const st = tr.querySelector('.st');
     let cls = '', text = '';
-    if (entry.status === 'scanning') text = 'Reading header…';
+    if (entry.status === 'scanning') text = entry.kind === 'zip' ? 'Opening archive…' : 'Reading header…';
     else if (entry.status === 'error') { cls = 'err'; text = entry.error; }
     else if (entry.mergeError) { cls = 'err'; text = 'Failed: ' + entry.mergeError; }
     else if (!entry.recognized) { cls = 'warn'; text = 'No Plugin ID / Host column'; }
@@ -257,7 +298,7 @@
   el.sortFiles.addEventListener('click', () => {
     if (state.merging) return;
     const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
-    const name = x => x.file.webkitRelativePath || x.file.name;
+    const name = x => x.name;
     state.entries.sort((a, b) => collator.compare(name(a), name(b)));
     const frag = document.createDocumentFragment();
     for (const entry of state.entries) frag.appendChild(entry.row);
@@ -326,7 +367,7 @@
     const n = state.entries.length;
     el.filesCard.hidden = n === 0;
     el.optionsCard.hidden = n === 0;
-    const totalSize = state.entries.reduce((s, x) => s + x.file.size, 0);
+    const totalSize = state.entries.reduce((s, x) => s + x.size, 0);
     el.fileCount.textContent = n ? `${fmtNum(n)} · ${fmtBytes(totalSize)}` : '';
 
     const before = state.columns.map(c => c.name).join('\u0000');
@@ -351,7 +392,7 @@
     el.mergeBtn.disabled = state.merging || scanning > 0 || ready.length === 0 || included === 0 || badRules > 0;
     const parts = [];
     if (scanning) parts.push(`Reading headers… ${fmtNum(n - scanning)} / ${fmtNum(n)}`);
-    else if (ready.length) parts.push(`${fmtNum(ready.length)} report${ready.length > 1 ? 's' : ''} ready (${fmtBytes(ready.reduce((s, x) => s + x.file.size, 0))})`);
+    else if (ready.length) parts.push(`${fmtNum(ready.length)} report${ready.length > 1 ? 's' : ''} ready (${fmtBytes(ready.reduce((s, x) => s + x.size, 0))})`);
     if (errors) parts.push(`${fmtNum(errors)} unreadable, will be skipped`);
     if (!included && state.columns.length) parts.push('select at least one column');
     if (badRules) parts.push('fix the invalid exclusion rule');
@@ -509,11 +550,26 @@
   // ---------------------------------------------------------------------
   if (canSaveToDisk) el.optDiskWrap.hidden = false;
 
+  const FORMATS = {
+    xlsx: { ext: '.xlsx', description: 'Excel workbook', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
+    csv: { ext: '.csv', description: 'CSV file', mime: 'text/csv' },
+  };
+  const outputFormat = () => document.querySelector('input[name="format"]:checked').value;
+
   function outputName() {
-    let name = el.optName.value.trim().replace(/[\\/:*?"<>|]+/g, '_') || 'merged_tenable_report.csv';
-    if (!/\.csv$/i.test(name)) name += '.csv';
-    return name;
+    const { ext } = FORMATS[outputFormat()];
+    let name = el.optName.value.trim().replace(/[\\/:*?"<>|]+/g, '_') || 'merged_tenable_report';
+    name = name.replace(/\.(csv|xlsx)$/i, '');
+    return name + ext;
   }
+
+  function syncFormat() {
+    el.optBomWrap.hidden = outputFormat() !== 'csv';
+    el.optName.value = outputName();
+    clearResult();
+  }
+  for (const r of document.querySelectorAll('input[name="format"]')) r.addEventListener('change', syncFormat);
+  syncFormat();
 
   async function startMerge() {
     const entries = state.entries.filter(x => x.status === 'ready');
@@ -526,7 +582,7 @@
       try {
         handle = await window.showSaveFilePicker({
           suggestedName: outputName(),
-          types: [{ description: 'CSV file', accept: { 'text/csv': ['.csv'] } }],
+          types: [{ description: FORMATS[outputFormat()].description, accept: { [FORMATS[outputFormat()].mime]: [FORMATS[outputFormat()].ext] } }],
         });
       } catch (err) {
         if (err.name === 'AbortError') return;
@@ -547,7 +603,7 @@
 
     const sentRules = activeRules().map(r => ({ column: r.column, op: r.op, n: ruleValues(r).length }));
     const startedAt = Date.now();
-    const totalBytes = entries.reduce((s, x) => s + x.file.size, 0);
+    const totalBytes = entries.reduce((s, x) => s + (x.zipEntry ? x.zipEntry.compSize : x.file.size), 0);
     const worker = createWorker();
     state.mergeWorker = worker;
     let activeRow = null;
@@ -576,7 +632,7 @@
         entry.mergeError = m.stats.error;
         renderRow(entry);
         const next = entries[m.fileIndex + 1];
-        if (next) el.progressFile.textContent = next.file.webkitRelativePath || next.file.name;
+        if (next) el.progressFile.textContent = next.name;
       } else if (m.type === 'done') {
         setProgress(1, totalBytes, null, m.stats.rowsOut, startedAt, totalBytes);
         el.progressTitle.textContent = 'Finishing…';
@@ -618,13 +674,14 @@
 
     worker.postMessage({
       type: 'merge',
-      files: entries.map(x => x.file),
+      sources: entries.map(x => ({ file: x.file, entry: x.zipEntry || null, kind: x.kind, name: x.name })),
       columns,
       outputHandle: handle,
       options: {
         dedupe: document.querySelector('input[name="dedupe"]:checked').value,
         addSource: el.optSource.checked,
         excludeInfo: el.optInfo.checked,
+        format: outputFormat(),
         bom: el.optBom.checked,
         rules: activeRules().map(r => ({ column: r.column, op: r.op, values: ruleValues(r) })),
       },
@@ -644,7 +701,7 @@
       parts.push(`~${fmtDuration(elapsed / frac - elapsed)} left`);
     }
     el.progressDetail.textContent = parts.join(' · ');
-    if (entry) el.progressFile.textContent = entry.file.webkitRelativePath || entry.file.name;
+    if (entry) el.progressFile.textContent = entry.name;
   }
 
   el.mergeBtn.addEventListener('click', startMerge);
@@ -722,14 +779,20 @@
       el.ruleResults.append(h, ul);
     }
 
-    if (stats.rowsOut > EXCEL_MAX_ROWS) {
-      notice(el.resultNotices, `The merged file has ${fmtNum(stats.rowsOut)} rows. Excel can only open the first ${fmtNum(EXCEL_MAX_ROWS)}. Try excluding informational findings, or open it in a tool without that limit.`);
+    if (stats.format === 'xlsx' && stats.sheets > 1) {
+      notice(el.resultNotices, `${fmtNum(stats.rowsOut)} rows is more than one Excel sheet can hold, so the workbook has ${stats.sheets} sheets ("Findings", "Findings (2)", …), each with its own header row.`);
+    }
+    if (stats.truncatedCells) {
+      notice(el.resultNotices, `${fmtNum(stats.truncatedCells)} cell${stats.truncatedCells > 1 ? 's were' : ' was'} longer than Excel's 32,767-character limit and ${stats.truncatedCells > 1 ? 'were' : 'was'} cut short (marked "[truncated]"). Choose CSV output to keep the full text.`);
+    }
+    if (stats.format === 'csv' && stats.rowsOut > EXCEL_MAX_ROWS) {
+      notice(el.resultNotices, `The merged file has ${fmtNum(stats.rowsOut)} rows. Excel can only open the first ${fmtNum(EXCEL_MAX_ROWS)}. Choose Excel output to split it across sheets, or exclude informational findings.`);
     }
     if (stats.malformed) {
       notice(el.resultNotices, `${fmtNum(stats.malformed)} row${stats.malformed > 1 ? 's' : ''} had a different number of fields than their header. They were kept, with values mapped by position.`);
     }
     const failed = stats.perFile.map((s, i) => [s, entries[i]]).filter(([s]) => s.error);
-    for (const [s, entry] of failed) notice(el.resultNotices, `${entry.file.name}: ${s.error}`);
+    for (const [s, entry] of failed) notice(el.resultNotices, `${entry.name}: ${s.error}`);
     const unrecognized = entries.filter(x => !x.recognized).length;
     if (unrecognized) {
       notice(el.resultNotices, `${fmtNum(unrecognized)} report${unrecognized > 1 ? 's have' : ' has'} no Plugin ID / Host column, so ${unrecognized > 1 ? 'they may not be' : 'it may not be'} Tenable exports. Merged anyway; duplicate checks fall back to identical-row matching.`);

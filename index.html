@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Tenable CSV Merger</title>
+  <title>Tenable Report Merger</title>
   <!-- Styles are inlined: on some Windows setups a bad registry MIME type for
        .css makes browsers ignore stylesheets loaded from local files. -->
   <style>
@@ -192,6 +192,16 @@
     .rule-results h3 { margin: 16px 0 6px; font-size: 13px; }
     .rule-results ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
 
+    /* Output format toggle */
+    .format { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin: 2px 0 6px; }
+    .format label { cursor: pointer; }
+    .format input { position: absolute; opacity: 0; pointer-events: none; }
+    .format span { display: block; padding: 6px 14px; font-weight: 550; font-size: 13px; color: var(--muted); }
+    .format label + label span { border-left: 1px solid var(--border); }
+    .format input:checked + span { background: var(--accent); color: var(--accent-ink); }
+    .format input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .dz-sub code { font-family: var(--mono); font-size: 12.5px; }
+
     /* Columns */
     details.columns { margin-top: 16px; border: 1px solid var(--border); border-radius: 8px; }
     details.columns summary {
@@ -249,7 +259,7 @@
   <header class="topbar">
     <div class="brand">
       <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M4 5h7v6H4zM13 5h7v6h-7zM4 13h16v6H4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
-      <h1>Tenable CSV Merger</h1>
+      <h1>Tenable Report Merger</h1>
     </div>
     <p class="privacy">
       <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
@@ -259,10 +269,10 @@
 
   <main>
     <section class="card" id="drop-card">
-      <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Add CSV reports">
+      <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Add reports">
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 16V4m0 0l-4 4m4-4l4 4M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        <p class="dz-title">Drop Tenable / Nessus CSV exports here</p>
-        <p class="dz-sub">Files or whole folders. Any number, any size.</p>
+        <p class="dz-title">Drop Tenable / Nessus exports here</p>
+        <p class="dz-sub"><code>.nessus</code>, <code>.csv</code>, or <code>.zip</code> archives of them. Files or whole folders, any number, any size.</p>
         <div class="dz-actions">
           <button type="button" class="btn" id="pick-files">Choose files</button>
           <button type="button" class="btn" id="pick-folder">Choose folder</button>
@@ -303,16 +313,20 @@
         </fieldset>
         <fieldset>
           <legend>Output</legend>
+          <div class="format" role="radiogroup" aria-label="Output format">
+            <label><input type="radio" name="format" value="xlsx" checked><span>Excel workbook (.xlsx)</span></label>
+            <label><input type="radio" name="format" value="csv"><span>CSV</span></label>
+          </div>
           <label class="check"><input type="checkbox" id="opt-source" checked>
             <span><strong>Add “Source File” column</strong><small>Records which report each row came from</small></span></label>
           <label class="check"><input type="checkbox" id="opt-info">
             <span><strong>Exclude informational findings</strong><small>Drops rows with Risk / Severity of None or Info</small></span></label>
-          <label class="check"><input type="checkbox" id="opt-bom" checked>
+          <label class="check" id="opt-bom-wrap"><input type="checkbox" id="opt-bom" checked>
             <span><strong>Add UTF-8 BOM</strong><small>Helps Excel display non-ASCII characters correctly</small></span></label>
           <label class="check" id="opt-disk-wrap" hidden><input type="checkbox" id="opt-disk" checked>
             <span><strong>Stream straight to disk</strong><small>Asks where to save first; best for very large merges</small></span></label>
           <label class="field">File name
-            <input type="text" id="opt-name" value="merged_tenable_report.csv" spellcheck="false">
+            <input type="text" id="opt-name" value="merged_tenable_report.xlsx" spellcheck="false">
           </label>
         </fieldset>
       </div>
@@ -363,7 +377,7 @@
       <div class="card-head">
         <h2>Merged</h2>
         <div class="head-actions">
-          <button type="button" class="btn primary" id="download-btn">Download CSV</button>
+          <button type="button" class="btn primary" id="download-btn">Download</button>
         </div>
       </div>
       <p class="result-saved" id="result-saved" hidden></p>
