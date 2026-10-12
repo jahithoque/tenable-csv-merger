@@ -1,11 +1,14 @@
 /*
  * Merge engine. Everything lives inside mergeWorkerMain so app.js can
- * serialise it into a Blob-URL worker — that keeps the app working when
+ * serialise it into a Blob-URL worker \u2014 that keeps the app working when
  * index.html is opened straight from disk (file://), where
  * `new Worker('merge-worker.js')` would be blocked.
  */
 function mergeWorkerMain() {
   'use strict';
+
+  // Must match APP_VERSION in app.js; the page warns when files are mixed.
+  const WORKER_VERSION = '2026.10.12-3';
 
   const READ_CHUNK = 4 * 1024 * 1024;        // bytes per file read
   const PROBE_CHUNK = 256 * 1024;            // bytes per read when sniffing headers
@@ -203,7 +206,7 @@ function mergeWorkerMain() {
     return m ? [(m[1] || m[2]).trim(), m[3].toUpperCase()] : null;
   }
 
-  // Buckets: 0 passed, 1 failed, 2 warning, 3 other (error, skipped, …).
+  // Buckets: 0 passed, 1 failed, 2 warning, 3 other (error, skipped, \u2026).
   function complianceBucket(result) {
     const r = result.trim().toUpperCase();
     if (!r) return -1;
@@ -224,7 +227,7 @@ function mergeWorkerMain() {
   }
 
   // Credential failure plugins (e.g. 104410) list each failed login as
-  // "Protocol : SMB / Port : 445 / User : 'admin' / Error : …" blocks.
+  // "Protocol : SMB / Port : 445 / User : 'admin' / Error : \u2026" blocks.
   const AUTH_FIELDS = ['protocol', 'port', 'user', 'domain', 'error'];
   function parseAuthOutput(text) {
     const found = { protocol: new Set(), port: new Set(), user: new Set(), domain: new Set(), error: new Set() };
@@ -254,7 +257,7 @@ function mergeWorkerMain() {
   }
 
   function normalizeHeader(h) {
-    return h.replace(/^﻿/, '').trim();
+    return h.replace(/^\uFEFF/, '').trim();
   }
 
   function findColumn(headers, aliases) {
@@ -391,7 +394,7 @@ function mergeWorkerMain() {
 
   const sourceBytes = src => (src.entry ? src.entry.compSize : src.file.size);
 
-  // Yields { text, bytes } — decoded text plus how many bytes of the input
+  // Yields { text, bytes } \u2014 decoded text plus how many bytes of the input
   // file were consumed, for progress. Breaking out of the loop early stops
   // reading (and decompressing) immediately.
   async function* textChunks(src, chunkSize = READ_CHUNK) {
@@ -451,7 +454,7 @@ function mergeWorkerMain() {
   // ---------------------------------------------------------------------
   // .nessus (NessusClientData_v2) streaming reader. Buffers one ReportHost
   // at a time and turns each ReportItem into rows shaped like Tenable's CSV
-  // export — one row per CVE — so they merge cleanly with CSV reports.
+  // export \u2014 one row per CVE \u2014 so they merge cleanly with CSV reports.
   // ---------------------------------------------------------------------
   const NESSUS_COLUMNS = [
     'Plugin ID', 'CVE', 'CVSS v2.0 Base Score', 'Risk', 'Host', 'Protocol', 'Port', 'Name',
@@ -726,7 +729,7 @@ function mergeWorkerMain() {
   }
 
   // ---------------------------------------------------------------------
-  // Writing — straight to disk via the File System Access API when the
+  // Writing \u2014 straight to disk via the File System Access API when the
   // page handed us a file handle, otherwise into a Blob (which browsers can
   // page out to disk).
   // ---------------------------------------------------------------------
@@ -776,7 +779,7 @@ function mergeWorkerMain() {
     constructor(sink, cols, bom) {
       this.sink = sink;
       this.mime = 'text/csv;charset=utf-8';
-      if (bom) sink.append('﻿');
+      if (bom) sink.append('\uFEFF');
       sink.append(cols.map(csvEscape).join(',') + '\n');
     }
 
@@ -949,8 +952,8 @@ function mergeWorkerMain() {
   const XLSX_MAX_ROWS = 1048575;        // data rows per sheet, plus the header row
   const XLSX_MAX_CELL = 32767;          // Excel's per-cell character limit
   const XLSX_SHEET_BYTES = 4.0e9;       // a sheet's XML must stay under the 4 GB ZIP entry limit
-  const BAD_XML_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F￾￿]/g;
-  const XML_SPECIAL = /[&<>\x00-\x08\x0B\x0C\x0E-\x1F￾￿]/;
+  const BAD_XML_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g;
+  const XML_SPECIAL = /[&<>\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/;
   const NUMERIC = /^-?(?:0|[1-9]\d{0,14})(?:\.\d{1,10})?$/;
   const NEW_SHEET = {};
   const NS_MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
@@ -1306,7 +1309,7 @@ function mergeWorkerMain() {
       await this.sink.flush();
     }
 
-    // summary: { sheets: [spec, …] }, placed before the findings sheets.
+    // summary: { sheets: [spec, \u2026] }, placed before the findings sheets.
     async finish(summary) {
       await this.flush();
       await this.endSheet();
@@ -1474,7 +1477,7 @@ function mergeWorkerMain() {
     const byHost = meta.identity === 'host';
     const T = byHost ? { one: 'host', Many: 'Hosts', many: 'hosts' } : { one: 'target', Many: 'Targets', many: 'targets' };
     const showReport = meta.identity === 'report';
-    const label = h => h.host + (h.ip && h.ip !== h.host && !byHost ? ` (${h.ip})` : '') + (showReport && h.report ? ` — ${h.report}` : '');
+    const label = h => h.host + (h.ip && h.ip !== h.host && !byHost ? ` (${h.ip})` : '') + (showReport && h.report ? ` \u2014 ${h.report}` : '');
     const hasVulns = agg.vulnTotal > 0;
     const hasComp = agg.compTotal > 0;
     const sevRows = SEVERITIES.filter((s, i) => i < 5 || agg.sev[5] > 0);
@@ -1494,7 +1497,7 @@ function mergeWorkerMain() {
     const authList = agg.auth.slice().sort((x, y) =>
       collator.compare(x.host, y.host) || collator.compare(x.ip, y.ip) || collator.compare(x.source, y.source) || collator.compare(x.port, y.port));
 
-    // --- Dashboard: an 8-column grid (B–I) between narrow margins, gridlines
+    // --- Dashboard: an 8-column grid (B\u2013I) between narrow margins, gridlines
     // off. Every row's spans add up to 8 so tables line up and stay centred;
     // charts get their own reserved rows so they never cover a table.
     const GRID = 8;
@@ -1531,9 +1534,9 @@ function mergeWorkerMain() {
     const full = (v, s, ht) => line([{ v, s, span: GRID }], ht);
     const head = labels => line(labels.map(([v, span]) => ({ v, s: ST.header, span })), 24);
 
-    full('Tenable Report — Merged Summary', ST.title, 34);
+    full('Tenable Report \u2014 Merged Summary', ST.title, 34);
     full(`Generated ${meta.generated} from ${meta.reports} report${meta.reports === 1 ? '' : 's'}` +
-      (meta.appVersion ? ` · Tenable Report Merger v${meta.appVersion}` : ''), ST.subtitle, 18);
+      (meta.appVersion ? ` \u00B7 Tenable Report Merger v${meta.appVersion}` : ''), ST.subtitle, 18);
     blank(10);
 
     // KPI tiles: 4 per row (2 columns each); a short last row is centred.
@@ -1577,7 +1580,7 @@ function mergeWorkerMain() {
     }
     const anchors = chartTypes.length === 2
       ? { bar: [1, 5], doughnut: [5, 9] }
-      : { [chartTypes[0]]: [2, 8] }; // columns C–H, centred
+      : { [chartTypes[0]]: [2, 8] }; // columns C\u2013H, centred
     const charts = [];
     const addChart = (type, chart) => {
       const [c0, c1] = anchors[type];
@@ -1618,7 +1621,7 @@ function mergeWorkerMain() {
       const last = rows.length;
       line([{ v: 'Total', s: ST.tdBold, span: 4 }, { v: agg.compTotal, s: ST.tdNumBold, span: 2 }, { v: 1, s: ST.tdPct, span: 2 }]);
       line([{ v: 'Compliance score', s: ST.tdBold, span: 4 }, { v: compScore, s: ST.tdPct, span: 4 }]);
-      full('Score = Passed ÷ (Passed + Failed + Warning / Manual check)', ST.note);
+      full('Score = Passed \u00F7 (Passed + Failed + Warning / Manual check)', ST.note);
       blank(10);
       addChart('doughnut', {
         title: 'Compliance results', catRange: `$B$${first}:$B$${last}`, valRange: `$F$${first}:$F$${last}`,
@@ -1647,7 +1650,7 @@ function mergeWorkerMain() {
           line(cols.map(([name, span]) => ({ ...vals[name], span })));
         }
         if (authList.length > AUTH_ON_DASHBOARD) {
-          full(`… and ${authList.length - AUTH_ON_DASHBOARD} more. See the "Auth Failures" sheet.`, ST.note);
+          full(`\u2026 and ${authList.length - AUTH_ON_DASHBOARD} more. See the "Auth Failures" sheet.`, ST.note);
         }
       }
       blank(10);
@@ -1736,7 +1739,7 @@ function mergeWorkerMain() {
       for (const [id, p] of pluginList.slice(0, XLSX_MAX_ROWS)) {
         vulnRows.push(tableCells([asNumber(id), p.name, ...(anyFamily ? [p.family] : []),
           { v: SEVERITIES[p.sev][0], s: SEVERITIES[p.sev][1] }, p.hosts, p.rows,
-          [...p.cves].join(', ') + (p.cves.size >= MAX_CVES_PER_PLUGIN ? ', …' : '')]));
+          [...p.cves].join(', ') + (p.cves.size >= MAX_CVES_PER_PLUGIN ? ', \u2026' : '')]));
       }
       sheets.push({
         name: 'Vulnerabilities', widths: [10, 60, ...(anyFamily ? [24] : []), 10, 15, 13, 40], rows: vulnRows, autoHeight: true, heights: { 0: 24 },
@@ -1777,7 +1780,7 @@ function mergeWorkerMain() {
     const srcRows = [srcHead.map(v => ({ v, s: ST.header }))];
     meta.sources.forEach((src, i) => {
       const st = meta.perFile[i] || {};
-      const where = st.sheetFirst === null || st.sheetFirst === undefined ? '—'
+      const where = st.sheetFirst === null || st.sheetFirst === undefined ? '\u2014'
         : findingsSheetName(st.sheetFirst) + (st.sheetLast > st.sheetFirst ? ` to ${findingsSheetName(st.sheetLast)}` : '');
       srcRows.push(tableCells([src.name, src.kind === 'nessus' ? '.nessus' : 'CSV', st.rowsIn || 0, st.rowsOut || 0, where,
         st.duplicates || 0, st.filtered || 0, st.excluded || 0, st.auth || 0,
@@ -1793,8 +1796,20 @@ function mergeWorkerMain() {
   // ---------------------------------------------------------------------
   let cancelled = false;
 
+  // Guards against damaged copies of this file: if a download or copy-paste
+  // altered the character classes above (e.g. turned the escaped
+  // non-characters into spaces), every space would be stripped from the
+  // workbook. Refuse to run instead.
+  function selfCheck() {
+    if (xmlEscape('a b & c') !== 'a b &amp; c' || BAD_XML_CHARS.test(' ') || csvEscape('a b') !== '"a b"') {
+      throw new Error('merge-worker.js is damaged (its text handling no longer keeps spaces). ' +
+        'Download the ZIP again from GitHub (Code > Download ZIP), extract all files, and reopen index.html.');
+    }
+  }
+
   async function merge(msg) {
     cancelled = false;
+    selfCheck();
     const { sources, columns, options, outputHandle } = msg;
     const outCols = columns.slice();
     const sourceIdx = options.addSource ? outCols.length : -1;
@@ -2084,6 +2099,8 @@ function mergeWorkerMain() {
             self.postMessage({ type: 'scanResult', id, error: String(err && err.message || err) });
           }
         }
+      } else if (msg.type === 'version') {
+        self.postMessage({ type: 'version', version: WORKER_VERSION });
       } else if (msg.type === 'merge') {
         await merge(msg);
       } else if (msg.type === 'cancel') {

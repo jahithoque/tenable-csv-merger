@@ -4,7 +4,7 @@
 
   // Shown in the page header and stamped on every workbook's dashboard, so a
   // report can be traced to the build that produced it.
-  const APP_VERSION = '2026.10.12-2';
+  const APP_VERSION = '2026.10.12-3';
   const EXCEL_MAX_ROWS = 1048575; // 1,048,576 minus the header row
   const SEVERITY_ORDER = [
     ['critical', 'Critical', 'var(--sev-critical)'],
@@ -54,6 +54,14 @@
     nextRuleId: 1,
   };
 
+  // index.html, app.js and merge-worker.js must come from the same download.
+  if (typeof mergeWorkerMain !== 'function') {
+    document.body.insertAdjacentHTML('afterbegin',
+      '<p class="notice" style="margin:16px">merge-worker.js is missing or damaged. Download the ZIP from GitHub ' +
+      '(Code &gt; Download ZIP), extract all files into one folder, and open index.html from there.</p>');
+    return;
+  }
+
   // The worker source lives in merge-worker.js as a plain function so it can
   // be loaded by a <script> tag and turned into a Blob URL here. This works
   // even when the page is opened from file://.
@@ -67,7 +75,7 @@
   const nf = new Intl.NumberFormat();
   const fmtNum = n => nf.format(n);
   function fmtBytes(b) {
-    if (b == null) return '—';
+    if (b == null) return '\u2014';
     const u = ['B', 'KB', 'MB', 'GB', 'TB'];
     let i = 0;
     while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
@@ -92,6 +100,11 @@
   const scanWorker = createWorker();
   scanWorker.onmessage = e => {
     const m = e.data;
+    if (m.type === 'version' && m.version !== APP_VERSION) {
+      document.body.insertAdjacentHTML('afterbegin',
+        `<p class="notice" style="margin:16px">app.js (v${APP_VERSION}) and merge-worker.js (v${m.version || 'unknown'}) are from ` +
+        'different versions. Download the ZIP from GitHub again and replace all files together.</p>');
+    }
     if (m.type !== 'scanResult') return;
     const entry = state.entries.find(x => x.id === m.id);
     if (!entry) return; // removed while scanning
@@ -123,7 +136,7 @@
       state.fingerprints.add(fp);
       kids.push({
         id: state.nextId++, file: zip.file, zipEntry: c.entry, kind: c.kind,
-        name: `${zip.name} › ${c.name}`, size: c.size, fp, merged: null,
+        name: `${zip.name} \u203A ${c.name}`, size: c.size, fp, merged: null,
         status: c.error ? 'error' : 'ready', error: c.error, headers: c.headers, recognized: c.recognized,
         compliance: !!c.compliance, derive: !!c.derive,
       });
@@ -146,6 +159,8 @@
     }
     scheduleRefresh();
   }
+
+  scanWorker.postMessage({ type: 'version' });
 
   function addFiles(fileList) {
     if (state.merging) return;
@@ -207,7 +222,7 @@
   }
 
   // The file inputs are created on demand and never attached to the page, so
-  // the native "Browse… / No file selected" controls can't leak into the layout.
+  // the native "Browse\u2026 / No file selected" controls can't leak into the layout.
   function openPicker(folder) {
     if (state.merging) return;
     const input = document.createElement('input');
@@ -249,7 +264,7 @@
     const tr = document.createElement('tr');
     tr.innerHTML = '<td class="num idx"></td><td class="name"></td><td class="num size"></td>' +
       '<td class="num cols"></td><td class="st"></td><td class="num merged"></td>' +
-      '<td><button type="button" class="remove" aria-label="Remove">×</button></td>';
+      '<td><button type="button" class="remove" aria-label="Remove">\u00D7</button></td>';
     tr.querySelector('.name').textContent = entry.name;
     tr.querySelector('.name').title = entry.name;
     tr.querySelector('.size').textContent = fmtBytes(entry.size);
@@ -264,7 +279,7 @@
     if (!tr) return;
     const st = tr.querySelector('.st');
     let cls = '', text = '';
-    if (entry.status === 'scanning') text = entry.kind === 'zip' ? 'Opening archive…' : 'Reading header…';
+    if (entry.status === 'scanning') text = entry.kind === 'zip' ? 'Opening archive\u2026' : 'Reading header\u2026';
     else if (entry.status === 'error') { cls = 'err'; text = entry.error; }
     else if (entry.mergeError) { cls = 'err'; text = 'Failed: ' + entry.mergeError; }
     else if (!entry.recognized) { cls = 'warn'; text = 'No Plugin ID / Host column'; }
@@ -434,7 +449,7 @@
     el.filesCard.hidden = n === 0;
     el.optionsCard.hidden = n === 0;
     const totalSize = state.entries.reduce((s, x) => s + x.size, 0);
-    el.fileCount.textContent = n ? `${fmtNum(n)} · ${fmtBytes(totalSize)}` : '';
+    el.fileCount.textContent = n ? `${fmtNum(n)} \u00B7 ${fmtBytes(totalSize)}` : '';
 
     const before = state.columns.map(c => c.name).join('\u0000');
     state.columns = computeColumns();
@@ -457,14 +472,14 @@
     const badRules = state.rules.filter(ruleError).length;
     el.mergeBtn.disabled = state.merging || scanning > 0 || ready.length === 0 || included === 0 || badRules > 0;
     const parts = [];
-    if (scanning) parts.push(`Reading headers… ${fmtNum(n - scanning)} / ${fmtNum(n)}`);
+    if (scanning) parts.push(`Reading headers\u2026 ${fmtNum(n - scanning)} / ${fmtNum(n)}`);
     else if (ready.length) parts.push(`${fmtNum(ready.length)} report${ready.length > 1 ? 's' : ''} ready (${fmtBytes(ready.reduce((s, x) => s + x.size, 0))})`);
     if (errors) parts.push(`${fmtNum(errors)} unreadable, will be skipped`);
     if (!included && state.columns.length) parts.push('select at least one column');
     if (badRules) parts.push('fix the invalid exclusion rule');
     const rules = activeRules().length;
     if (rules && !badRules) parts.push(`${rules} exclusion rule${rules > 1 ? 's' : ''} active`);
-    el.mergeHint.textContent = parts.join(' · ');
+    el.mergeHint.textContent = parts.join(' \u00B7 ');
   }
 
 
@@ -488,7 +503,7 @@
   function ruleError(rule) {
     if (rule.op !== 'regex') return null;
     for (const v of ruleValues(rule)) {
-      try { new RegExp(v, 'i'); } catch (err) { return `Invalid pattern “${v}”`; }
+      try { new RegExp(v, 'i'); } catch (err) { return `Invalid pattern \u201C${v}\u201D`; }
     }
     return null;
   }
@@ -559,7 +574,7 @@
       const del = document.createElement('button');
       del.type = 'button';
       del.className = 'remove';
-      del.textContent = '×';
+      del.textContent = '\u00D7';
       del.setAttribute('aria-label', 'Remove rule');
       del.addEventListener('click', () => {
         state.rules = state.rules.filter(r => r !== rule);
@@ -592,7 +607,7 @@
       rule.metaEl.className = 'rule-meta' + (err ? ' err' : '');
       let text = err || (n ? `${n} value${n > 1 ? 's' : ''}` : 'No values yet; this rule is ignored');
       if (!err && missing && ready.length) {
-        text += ` · column not in ${missing} of ${ready.length} report${ready.length > 1 ? 's' : ''} (rule skipped there)`;
+        text += ` \u00B7 column not in ${missing} of ${ready.length} report${ready.length > 1 ? 's' : ''} (rule skipped there)`;
       }
       rule.metaEl.textContent = text;
     }
@@ -658,7 +673,7 @@
     refresh();
 
     el.progressCard.hidden = false;
-    el.progressTitle.textContent = 'Merging…';
+    el.progressTitle.textContent = 'Merging\u2026';
     el.cancelBtn.disabled = false;
     setProgress(0, 0, entries[0], 0, Date.now());
     el.progressCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -697,7 +712,7 @@
         if (next) el.progressFile.textContent = next.name;
       } else if (m.type === 'done') {
         setProgress(1, totalBytes, null, m.stats.rowsOut, startedAt, totalBytes);
-        el.progressTitle.textContent = 'Finishing…';
+        el.progressTitle.textContent = 'Finishing\u2026';
         el.cancelBtn.disabled = true;
         let savedTo = null;
         try {
@@ -768,7 +783,7 @@
       parts.push(`${fmtBytes(bytesDone / (elapsed / 1000))}/s`);
       parts.push(`~${fmtDuration(elapsed / frac - elapsed)} left`);
     }
-    el.progressDetail.textContent = parts.join(' · ');
+    el.progressDetail.textContent = parts.join(' \u00B7 ');
     if (entry) el.progressFile.textContent = entry.name;
   }
 
@@ -777,7 +792,7 @@
     const worker = state.mergeWorker;
     if (!worker) return;
     el.cancelBtn.disabled = true;
-    el.progressTitle.textContent = 'Cancelling…';
+    el.progressTitle.textContent = 'Cancelling\u2026';
     worker.postMessage({ type: 'cancel' });
     // If the worker is stuck mid-chunk, don't wait forever.
     setTimeout(() => {
@@ -839,7 +854,7 @@
     if (stats.summarySheets && stats.summarySheets.length) {
       const p = document.createElement('p');
       p.className = 'result-sheets';
-      p.textContent = `Workbook sheets: ${[...stats.summarySheets, 'Findings'].join(' · ')}`;
+      p.textContent = `Workbook sheets: ${[...stats.summarySheets, 'Findings'].join(' \u00B7 ')}`;
       el.severity.appendChild(p);
     }
 
@@ -858,7 +873,7 @@
     }
 
     if (stats.format === 'xlsx' && stats.sheets > 1) {
-      notice(el.resultNotices, `The findings continue across ${stats.sheets} sheets ("Findings", "Findings (2)", …), each with its own header row, because Excel allows at most 1,048,576 rows per sheet. The Sources sheet shows which sheet holds each report's rows.`);
+      notice(el.resultNotices, `The findings continue across ${stats.sheets} sheets ("Findings", "Findings (2)", \u2026), each with its own header row, because Excel allows at most 1,048,576 rows per sheet. The Sources sheet shows which sheet holds each report's rows.`);
     }
     if (stats.auth) {
       notice(el.resultNotices, `${fmtNum(stats.auth)} authentication-failure row${stats.auth > 1 ? 's were' : ' was'} moved out of Findings to the "Auth Failures" sheet.`);
