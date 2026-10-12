@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tenable CSV Merger</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h7v6H4zM13 5h7v6h-7zM4 13h16v6H4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+      <h1>Tenable CSV Merger</h1>
+    </div>
+    <p class="privacy">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+      Processed entirely in your browser. Nothing is uploaded.
+    </p>
+  </header>
+
+  <main>
+    <section class="card" id="drop-card">
+      <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Add CSV reports">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0l-4 4m4-4l4 4M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <p class="dz-title">Drop Tenable / Nessus CSV exports here</p>
+        <p class="dz-sub">Files or whole folders. Any number, any size.</p>
+        <div class="dz-actions">
+          <button type="button" class="btn" id="pick-files">Choose files</button>
+          <button type="button" class="btn" id="pick-folder">Choose folder</button>
+        </div>
+      </div>
+      <input type="file" id="file-input" accept=".csv,text/csv" multiple hidden>
+      <input type="file" id="folder-input" webkitdirectory multiple hidden>
+    </section>
+
+    <section class="card" id="files-card" hidden>
+      <div class="card-head">
+        <h2>Reports <span class="count" id="file-count"></span></h2>
+        <div class="head-actions">
+          <button type="button" class="btn ghost small" id="sort-files">Sort by name</button>
+          <button type="button" class="btn ghost small danger" id="clear-files">Clear all</button>
+        </div>
+      </div>
+      <div id="file-notices"></div>
+      <div class="table-wrap">
+        <table class="files">
+          <thead>
+            <tr><th class="num">#</th><th>File</th><th class="num">Size</th><th class="num">Columns</th><th>Status</th><th class="num">Rows merged</th><th></th></tr>
+          </thead>
+          <tbody id="file-rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card" id="options-card" hidden>
+      <div class="card-head"><h2>Merge options</h2></div>
+      <div class="options-grid">
+        <fieldset>
+          <legend>Duplicates</legend>
+          <label class="radio"><input type="radio" name="dedupe" value="exact" checked>
+            <span><strong>Remove identical rows</strong><small>Rows whose every value matches a row already merged</small></span></label>
+          <label class="radio"><input type="radio" name="dedupe" value="key">
+            <span><strong>Remove repeated findings</strong><small>Same Plugin ID + Host + Protocol + Port + CVE; keeps the first one seen (file order)</small></span></label>
+          <label class="radio"><input type="radio" name="dedupe" value="none">
+            <span><strong>Keep everything</strong><small>Plain concatenation</small></span></label>
+        </fieldset>
+        <fieldset>
+          <legend>Output</legend>
+          <label class="check"><input type="checkbox" id="opt-source" checked>
+            <span><strong>Add “Source File” column</strong><small>Records which report each row came from</small></span></label>
+          <label class="check"><input type="checkbox" id="opt-info">
+            <span><strong>Exclude informational findings</strong><small>Drops rows with Risk / Severity of None or Info</small></span></label>
+          <label class="check"><input type="checkbox" id="opt-bom" checked>
+            <span><strong>Add UTF-8 BOM</strong><small>Helps Excel display non-ASCII characters correctly</small></span></label>
+          <label class="check" id="opt-disk-wrap" hidden><input type="checkbox" id="opt-disk" checked>
+            <span><strong>Stream straight to disk</strong><small>Asks where to save first; best for very large merges</small></span></label>
+          <label class="field">File name
+            <input type="text" id="opt-name" value="merged_tenable_report.csv" spellcheck="false">
+          </label>
+        </fieldset>
+      </div>
+
+      <details class="columns" id="columns-panel">
+        <summary>
+          <span>Columns <span class="count" id="col-count"></span></span>
+          <span class="col-note" id="col-note"></span>
+        </summary>
+        <div class="col-tools">
+          <button type="button" class="btn ghost small" id="cols-all">Select all</button>
+          <button type="button" class="btn ghost small" id="cols-none">Select none</button>
+          <span class="legend"><span class="chip partial sample">Partial</span> = missing from some reports (left blank there)</span>
+        </div>
+        <div class="chips" id="col-chips"></div>
+      </details>
+
+      <div class="merge-bar">
+        <button type="button" class="btn primary" id="merge-btn" disabled>Merge reports</button>
+        <span class="merge-hint" id="merge-hint"></span>
+      </div>
+    </section>
+
+    <section class="card" id="progress-card" hidden>
+      <div class="card-head">
+        <h2 id="progress-title">Merging…</h2>
+        <button type="button" class="btn ghost small danger" id="cancel-btn">Cancel</button>
+      </div>
+      <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="progress-bar"><div id="progress-fill"></div></div>
+      <div class="progress-meta">
+        <span id="progress-pct">0%</span>
+        <span id="progress-detail"></span>
+      </div>
+      <p class="progress-file" id="progress-file"></p>
+    </section>
+
+    <section class="card" id="result-card" hidden>
+      <div class="card-head">
+        <h2>Merged</h2>
+        <div class="head-actions">
+          <button type="button" class="btn primary" id="download-btn">Download CSV</button>
+        </div>
+      </div>
+      <p class="result-saved" id="result-saved" hidden></p>
+      <div class="stats" id="stats"></div>
+      <div class="severity" id="severity"></div>
+      <div id="result-notices"></div>
+    </section>
+  </main>
+
+  <script src="merge-worker.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
