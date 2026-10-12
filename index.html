@@ -189,7 +189,8 @@
     .rule-meta { margin-top: 4px; color: var(--muted); font-size: 12px; }
     .rule-meta.err { color: var(--danger); }
     .rules-tools { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
-    .rule-results h3 { margin: 16px 0 6px; font-size: 13px; }
+    .rule-results h3, .bar-title { margin: 16px 0 6px; font-size: 13px; }
+    .result-sheets { margin: 14px 0 0; color: var(--muted); font-size: 13px; }
     .rule-results ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
 
     /* Output format toggle */
@@ -203,15 +204,21 @@
     .dz-sub code { font-family: var(--mono); font-size: 12.5px; }
 
     /* Columns */
-    details.columns { margin-top: 16px; border: 1px solid var(--border); border-radius: 8px; }
+    fieldset.columns { margin-top: 16px; }
+    .preset-label { color: var(--muted); font-size: 12.5px; font-weight: 600; }
+    #col-search {
+      margin-left: auto; min-width: 180px; font-size: 13px; color: var(--text);
+      background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 5px 9px;
+    }
+    #col-search:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
     details.columns summary {
       display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
       padding: 10px 14px; cursor: pointer; font-weight: 600;
     }
     .col-note { color: var(--muted); font-weight: 400; font-size: 13px; }
-    .col-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 0 14px 10px; }
-    .legend { color: var(--muted); font-size: 12.5px; margin-left: auto; }
-    .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 14px 14px; }
+    .col-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+    .legend { color: var(--muted); font-size: 12.5px; margin: 10px 0 0; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 240px; overflow: auto; }
     .chip {
       font: inherit; font-size: 12.5px;
       border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px;
@@ -307,7 +314,7 @@
           <label class="radio"><input type="radio" name="dedupe" value="exact" checked>
             <span><strong>Remove identical rows</strong><small>Rows whose every value matches a row already merged</small></span></label>
           <label class="radio"><input type="radio" name="dedupe" value="key">
-            <span><strong>Remove repeated findings</strong><small>Same Plugin ID + Host + Protocol + Port + CVE; keeps the first one seen (file order)</small></span></label>
+            <span><strong>Remove repeated findings</strong><small>Same Plugin ID + Host + Protocol + Port + CVE (and compliance check); keeps the first one seen (file order)</small></span></label>
           <label class="radio"><input type="radio" name="dedupe" value="none">
             <span><strong>Keep everything</strong><small>Plain concatenation</small></span></label>
         </fieldset>
@@ -320,7 +327,9 @@
           <label class="check"><input type="checkbox" id="opt-source" checked>
             <span><strong>Add “Source File” column</strong><small>Records which report each row came from</small></span></label>
           <label class="check"><input type="checkbox" id="opt-info">
-            <span><strong>Exclude informational findings</strong><small>Drops rows with Risk / Severity of None or Info</small></span></label>
+            <span><strong>Exclude informational findings</strong><small>Drops vulnerability rows with Risk None / Info. Compliance results (incl. PASSED) are always kept.</small></span></label>
+          <label class="check" id="opt-summary-wrap"><input type="checkbox" id="opt-summary" checked>
+            <span><strong>Include dashboard &amp; summary sheets</strong><small>Dashboard with charts, Hosts, Vulnerabilities, Compliance and Sources sheets before the findings</small></span></label>
           <label class="check" id="opt-bom-wrap"><input type="checkbox" id="opt-bom" checked>
             <span><strong>Add UTF-8 BOM</strong><small>Helps Excel display non-ASCII characters correctly</small></span></label>
           <label class="check" id="opt-disk-wrap" hidden><input type="checkbox" id="opt-disk" checked>
@@ -341,18 +350,21 @@
         </div>
       </fieldset>
 
-      <details class="columns" id="columns-panel">
-        <summary>
-          <span>Columns <span class="count" id="col-count"></span></span>
-          <span class="col-note" id="col-note"></span>
-        </summary>
+      <fieldset class="columns" id="columns-panel">
+        <legend>Columns in the export</legend>
+        <p class="rules-intro">Click a column to remove it from the exported report; click again to bring it back. <span class="count" id="col-count"></span> <span class="col-note" id="col-note"></span></p>
         <div class="col-tools">
-          <button type="button" class="btn ghost small" id="cols-all">Select all</button>
-          <button type="button" class="btn ghost small" id="cols-none">Select none</button>
-          <span class="legend"><span class="chip partial sample">Partial</span> = missing from some reports (left blank there)</span>
+          <span class="preset-label">Presets:</span>
+          <button type="button" class="btn small" data-preset="standard" title="The 13 columns of a default Nessus CSV export">Tenable standard</button>
+          <button type="button" class="btn small" data-preset="compliance" title="Host details and compliance check columns">Compliance</button>
+          <button type="button" class="btn ghost small" data-preset="all">All</button>
+          <button type="button" class="btn ghost small" data-preset="none">None</button>
+          <button type="button" class="btn ghost small" data-preset="reset" title="Forget your column choices">Reset</button>
+          <input type="search" id="col-search" placeholder="Filter columns…" aria-label="Filter columns" spellcheck="false">
         </div>
         <div class="chips" id="col-chips"></div>
-      </details>
+        <p class="legend"><span class="chip on sample">Included</span> <span class="chip sample">Removed</span> <span class="chip on partial sample">Dashed</span> = missing from some reports (left blank there)</p>
+      </fieldset>
 
       <div class="merge-bar">
         <button type="button" class="btn primary" id="merge-btn" disabled>Merge reports</button>

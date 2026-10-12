@@ -13,14 +13,26 @@ Works offline and straight from disk (`file://`).
 ## Inputs
 
 - **`.zip` archives** — e.g. the bulk downloads from Tenable. Every `.nessus` and `.csv` inside (including subfolders) is listed as its own report; nothing is extracted to disk.
-- **`.nessus` files** (NessusClientData_v2 XML) — each finding becomes a row using the same column names as Tenable's CSV export (one row per CVE), plus host details such as IP address, FQDN, NetBIOS name, OS and scan name.
+- **`.nessus` files** (NessusClientData_v2 XML) — each finding becomes a row using the same column names as Tenable's CSV export (one row per CVE), plus host details such as IP address, FQDN, NetBIOS name, OS and scan name, and compliance fields (check name, result, actual / policy value, reference, audit file) for compliance scans.
+- **Compliance results in CSV exports** — the check name and PASSED / FAILED / WARNING result are parsed from the Description into *Compliance Check* / *Compliance Result* columns.
 - **`.csv` exports** from Nessus / Tenable.
 
 Inputs can be mixed freely; the output contains the union of all columns.
 
 ## Output
 
-- **Excel workbook (.xlsx)** (default) — bold, frozen header row with filters, numbers stored as numbers. Results larger than Excel's 1,048,576-row limit continue on extra sheets. Cells over Excel's 32,767-character limit are cut short and marked `[truncated]` (use CSV to keep full text).
+- **Excel workbook (.xlsx)** (default), with these sheets:
+
+  | Sheet | Contents |
+  | --- | --- |
+  | **Dashboard** | Overview, vulnerabilities by severity (with hosts affected), compliance results and **compliance score**, top 10 riskiest hosts, top 10 vulnerabilities, top 10 failed checks, plus a severity bar chart and compliance doughnut chart (native Excel charts) |
+  | **Hosts** | Per host: IP / FQDN / OS, Critical–Info counts, Passed / Failed / Warning checks and pass rate |
+  | **Vulnerabilities** | Per plugin: severity, hosts affected, occurrences, CVEs |
+  | **Compliance** | Per check: Passed / Failed / Warning counts and pass rate (when compliance results exist) |
+  | **Sources** | Per report: rows read / written, duplicates, exclusions, errors |
+  | **Findings** | The merged rows |
+
+  The summary sheets can be switched off. Findings have a bold, frozen header row with filters and numbers stored as numbers. Results larger than Excel's 1,048,576-row limit continue on extra sheets. Cells over Excel's 32,767-character limit are cut short and marked `[truncated]` (use CSV to keep full text).
 - **CSV** — optional UTF-8 BOM for Excel.
 - **Stream straight to disk** (Chrome/Edge) — output is written to the chosen file as it is produced. Other browsers get a regular download.
 
@@ -29,11 +41,11 @@ Inputs can be mixed freely; the output contains the union of all columns.
 - **Handles large volumes** — files are streamed in chunks inside a Web Worker (one host at a time for `.nessus`), so multi-GB inputs and hundreds of reports don't freeze the page or exhaust memory.
 - **De-duplication**
   - *Remove identical rows* (default)
-  - *Remove repeated findings* — same Plugin ID + Host + Protocol + Port + CVE, keeping the first seen
+  - *Remove repeated findings* — same Plugin ID + Host + Protocol + Port + CVE (+ compliance check name), keeping the first seen
   - *Keep everything*
 - **Exclude findings by cell value** — add rules on any column, e.g. *Plugin ID is one of `19506, 10287, 11219-11220`*. Conditions: *is one of* (with numeric ranges), *is not one of* (keep only), *contains*, *matches regex*. Rows matching any rule are dropped, with per-rule counts in the summary. Rules are remembered in your browser.
-- **Column selection** — drop columns you don't need (e.g. `Plugin Output`) to shrink the file.
-- **Optional extras** — `Source File` column, exclude informational (Risk = None) findings.
+- **Column selection** — click columns to remove them from the export, filter the list by name, or use a preset (*Tenable standard*, *Compliance*, *All*, *None*). Choices are remembered in your browser; compliance columns switch on automatically when reports contain compliance results.
+- **Optional extras** — `Source File` column, exclude informational (Risk = None) vulnerability findings (compliance results, including PASSED checks, are always kept so the pass rate stays accurate).
 - **Summary** — rows read/written, duplicates removed, unique hosts and a severity breakdown.
 
 ## Files

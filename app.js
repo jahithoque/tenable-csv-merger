@@ -20,7 +20,8 @@
     sortFiles: $('sort-files'), clearFiles: $('clear-files'),
     optionsCard: $('options-card'), optSource: $('opt-source'), optInfo: $('opt-info'), optBom: $('opt-bom'), optBomWrap: $('opt-bom-wrap'),
     optDisk: $('opt-disk'), optDiskWrap: $('opt-disk-wrap'), optName: $('opt-name'),
-    colCount: $('col-count'), colNote: $('col-note'), colChips: $('col-chips'), colsAll: $('cols-all'), colsNone: $('cols-none'),
+    colCount: $('col-count'), colNote: $('col-note'), colChips: $('col-chips'), colSearch: $('col-search'),
+    optSummary: $('opt-summary'), optSummaryWrap: $('opt-summary-wrap'),
     mergeBtn: $('merge-btn'), mergeHint: $('merge-hint'),
     progressCard: $('progress-card'), progressTitle: $('progress-title'), progressBar: $('progress-bar'),
     progressFill: $('progress-fill'), progressPct: $('progress-pct'), progressDetail: $('progress-detail'),
@@ -40,7 +41,7 @@
     entries: [],              // { id, file, status, headers, recognized, error, row, merged }
     nextId: 1,
     fingerprints: new Set(),  // name|size|lastModified, to skip re-added files
-    excludedCols: new Set(),  // lower-cased column names the user turned off
+    colChoice: new Map(),     // lower-cased column name -> included?, set by the user
     columns: [],              // [{ name, key, count }]
     merging: false,
     mergeWorker: null,
@@ -98,6 +99,8 @@
       entry.status = 'ready';
       entry.headers = m.headers;
       entry.recognized = m.recognized;
+      entry.compliance = !!m.compliance;
+      entry.derive = !!m.derive;
     }
     renderRow(entry);
     scheduleRefresh();
@@ -118,6 +121,7 @@
         id: state.nextId++, file: zip.file, zipEntry: c.entry, kind: c.kind,
         name: `${zip.name} › ${c.name}`, size: c.size, fp, merged: null,
         status: c.error ? 'error' : 'ready', error: c.error, headers: c.headers, recognized: c.recognized,
+        compliance: !!c.compliance, derive: !!c.derive,
       });
     }
     const notes = [];
@@ -333,34 +337,81 @@
     return [...map.values()];
   }
 
+  // Column choices. Anything the user hasn't toggled falls back to a default:
+  // compliance columns are on only when some report holds compliance results.
+  const COMPLIANCE_COLS = ['compliance check', 'compliance result', 'compliance actual value',
+    'compliance policy value', 'compliance reference', 'compliance audit file'];
+  const COLUMN_PRESETS = {
+    standard: ['plugin id', 'cve', 'cvss v2.0 base score', 'risk', 'host', 'protocol', 'port', 'name',
+      'synopsis', 'description', 'solution', 'see also', 'plugin output'],
+    compliance: ['host', 'ip address', 'fqdn', 'netbios name', 'os', 'plugin id', 'name', 'risk',
+      ...COMPLIANCE_COLS, 'description', 'solution', 'scan name'],
+  };
+  const COLUMNS_STORAGE_KEY = 'tenable-merger.columns.v1';
+
+  const hasCompliance = () => state.entries.some(x => x.status === 'ready' && x.compliance);
+  function isIncluded(col) {
+    if (state.colChoice.has(col.key)) return state.colChoice.get(col.key);
+    return !COMPLIANCE_COLS.includes(col.key) || hasCompliance();
+  }
+  const includedColumns = () => state.columns.filter(isIncluded);
+
+  function saveColumns() {
+    try { localStorage.setItem(COLUMNS_STORAGE_KEY, JSON.stringify([...state.colChoice])); } catch (_) { /* unavailable */ }
+  }
+  function loadColumns() {
+    try {
+      for (const [k, v] of JSON.parse(localStorage.getItem(COLUMNS_STORAGE_KEY) || '[]')) {
+        if (typeof k === 'string' && typeof v === 'boolean') state.colChoice.set(k, v);
+      }
+    } catch (_) { /* ignore corrupt or unavailable storage */ }
+  }
+
+  function applyPreset(name) {
+    if (name === 'reset') state.colChoice.clear();
+    else {
+      const keep = COLUMN_PRESETS[name];
+      for (const c of state.columns) state.colChoice.set(c.key, name === 'all' || (!!keep && keep.includes(c.key)));
+    }
+    saveColumns();
+    clearResult();
+    refresh();
+  }
+  for (const b of document.querySelectorAll('[data-preset]')) b.addEventListener('click', () => applyPreset(b.dataset.preset));
+  el.colSearch.addEventListener('input', () => renderColumns());
+
   function renderColumns() {
     const ready = state.entries.filter(x => x.status === 'ready').length;
+    const filter = el.colSearch.value.trim().toLowerCase();
     el.colChips.textContent = '';
     const frag = document.createDocumentFragment();
     let partial = 0;
     for (const col of state.columns) {
-      const b = document.createElement('button');
-      b.type = 'button';
       const isPartial = col.count < ready;
       if (isPartial) partial++;
-      b.className = 'chip' + (state.excludedCols.has(col.key) ? '' : ' on') + (isPartial ? ' partial' : '');
+      if (filter && !col.key.includes(filter)) continue;
+      const on = isIncluded(col);
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'chip' + (on ? ' on' : '') + (isPartial ? ' partial' : '');
       b.textContent = col.name;
-      b.title = isPartial ? `Present in ${col.count} of ${ready} reports` : 'Present in every report';
-      b.setAttribute('aria-pressed', String(!state.excludedCols.has(col.key)));
+      b.title = (on ? 'Included. Click to remove. ' : 'Removed. Click to include. ') +
+        (isPartial ? `Present in ${col.count} of ${ready} reports.` : 'Present in every report.');
+      b.setAttribute('aria-pressed', String(on));
       b.addEventListener('click', () => {
-        if (state.excludedCols.has(col.key)) state.excludedCols.delete(col.key);
-        else state.excludedCols.add(col.key);
+        state.colChoice.set(col.key, !on);
+        saveColumns();
         clearResult();
         refresh();
       });
       frag.appendChild(b);
     }
     el.colChips.appendChild(frag);
-    const included = state.columns.filter(c => !state.excludedCols.has(c.key)).length;
-    el.colCount.textContent = `${included} of ${state.columns.length} selected`;
+    const included = includedColumns().length;
+    el.colCount.textContent = `${included} of ${state.columns.length} included.`;
     el.colNote.textContent = partial
-      ? `${partial} column${partial > 1 ? 's' : ''} missing from some reports`
-      : (state.columns.length ? 'All reports share the same columns' : '');
+      ? `${partial} column${partial > 1 ? 's are' : ' is'} missing from some reports.`
+      : (state.columns.length ? 'All reports share the same columns.' : '');
   }
 
   function refresh() {
@@ -386,7 +437,7 @@
     const scanning = state.entries.filter(x => x.status === 'scanning').length;
     const ready = state.entries.filter(x => x.status === 'ready');
     const errors = state.entries.filter(x => x.status === 'error').length;
-    const included = state.columns.filter(c => !state.excludedCols.has(c.key)).length;
+    const included = includedColumns().length;
 
     const badRules = state.rules.filter(ruleError).length;
     el.mergeBtn.disabled = state.merging || scanning > 0 || ready.length === 0 || included === 0 || badRules > 0;
@@ -401,12 +452,6 @@
     el.mergeHint.textContent = parts.join(' · ');
   }
 
-  el.colsAll.addEventListener('click', () => { state.excludedCols.clear(); clearResult(); refresh(); });
-  el.colsNone.addEventListener('click', () => {
-    for (const c of state.columns) state.excludedCols.add(c.key);
-    clearResult();
-    refresh();
-  });
 
   // ---------------------------------------------------------------------
   // Exclusion rules
@@ -565,6 +610,7 @@
 
   function syncFormat() {
     el.optBomWrap.hidden = outputFormat() !== 'csv';
+    el.optSummaryWrap.hidden = outputFormat() !== 'xlsx';
     el.optName.value = outputName();
     clearResult();
   }
@@ -573,7 +619,7 @@
 
   async function startMerge() {
     const entries = state.entries.filter(x => x.status === 'ready');
-    const columns = state.columns.filter(c => !state.excludedCols.has(c.key)).map(c => c.name);
+    const columns = includedColumns().map(c => c.name);
     if (!entries.length || !columns.length) return;
 
     // Must run first, while we still hold the click's user activation.
@@ -674,7 +720,7 @@
 
     worker.postMessage({
       type: 'merge',
-      sources: entries.map(x => ({ file: x.file, entry: x.zipEntry || null, kind: x.kind, name: x.name })),
+      sources: entries.map(x => ({ file: x.file, entry: x.zipEntry || null, kind: x.kind, name: x.name, derive: x.derive })),
       columns,
       outputHandle: handle,
       options: {
@@ -682,6 +728,7 @@
         addSource: el.optSource.checked,
         excludeInfo: el.optInfo.checked,
         format: outputFormat(),
+        summary: el.optSummary.checked,
         bom: el.optBom.checked,
         rules: activeRules().map(r => ({ column: r.column, op: r.op, values: ruleValues(r) })),
       },
@@ -749,6 +796,7 @@
       [fmtNum(stats.filtered), 'Info rows excluded'],
       [fmtNum(stats.excluded), 'Removed by rules'],
       [fmtNum(stats.uniqueHosts), 'Unique hosts'],
+      ...(compTotal(stats) ? [[`${(passRate(stats.compliance) * 100).toFixed(1)}%`, 'Compliance pass rate']] : []),
       [fmtNum(stats.columns), 'Columns'],
       [fmtBytes(stats.bytesOut), 'Output size'],
       [fmtDuration(elapsed), 'Time taken'],
@@ -763,7 +811,15 @@
       el.stats.appendChild(d);
     }
 
+    el.severity.textContent = '';
     renderSeverity(stats.severity);
+    if (compTotal(stats)) renderCompliance(stats.compliance);
+    if (stats.summarySheets && stats.summarySheets.length) {
+      const p = document.createElement('p');
+      p.className = 'result-sheets';
+      p.textContent = `Workbook sheets: ${[...stats.summarySheets, 'Findings'].join(' · ')}`;
+      el.severity.appendChild(p);
+    }
 
     el.ruleResults.textContent = '';
     if (rules.length) {
@@ -802,8 +858,17 @@
     if (blob && !savedTo) triggerDownload();
   }
 
+  const compTotal = stats => (stats.compliance || []).reduce((a, b) => a + b, 0);
+  const passRate = c => (c[0] + c[1] + c[2] ? c[0] / (c[0] + c[1] + c[2]) : 0);
+
+  function renderCompliance(c) {
+    addBar('Compliance results', [
+      ['Passed', c[0], 'var(--ok)'], ['Failed', c[1], 'var(--danger)'],
+      ['Warning', c[2], 'var(--sev-medium)'], ['Error / other', c[3], 'var(--muted)'],
+    ].filter(([, n]) => n));
+  }
+
   function renderSeverity(severity) {
-    el.severity.textContent = '';
     const counts = new Map();
     for (const [label, n] of Object.entries(severity)) {
       const key = label.toLowerCase();
@@ -817,7 +882,15 @@
     const items = SEVERITY_ORDER.filter(([k]) => counts.get(k)).map(([k, label, color]) => [label, counts.get(k), color]);
     const other = [...counts].filter(([k]) => !known.has(k)).reduce((s, [, n]) => s + n, 0);
     if (other) items.push(['Other', other, 'var(--muted)']);
+    addBar('Vulnerabilities by severity', items);
+  }
 
+  function addBar(title, items) {
+    const total = items.reduce((a, [, n]) => a + n, 0);
+    if (!total) return;
+    const h = document.createElement('h3');
+    h.className = 'bar-title';
+    h.textContent = title;
     const bar = document.createElement('div');
     bar.className = 'sev-bar';
     const legend = document.createElement('div');
@@ -835,7 +908,7 @@
       l.querySelector('b').style.fontWeight = '500';
       legend.appendChild(l);
     }
-    el.severity.append(bar, legend);
+    el.severity.append(h, bar, legend);
   }
 
   function triggerDownload() {
@@ -853,6 +926,7 @@
     if (state.merging) { e.preventDefault(); e.returnValue = ''; }
   });
 
+  loadColumns();
   loadRules();
   renderRules();
   refresh();

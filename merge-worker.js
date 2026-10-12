@@ -178,8 +178,49 @@ function mergeWorkerMain() {
     port: ['port'],
     cve: ['cve'],
     risk: ['risk', 'severity', 'risk factor'],
+    check: ['compliance check', 'compliance check name', 'check name'],
+    result: ['compliance result', 'compliance status'],
+    audit: ['compliance audit file', 'audit file'],
+    name: ['name', 'plugin name'],
+    family: ['plugin family', 'family'],
+    ip: ['ip address', 'host-ip', 'ip'],
+    fqdn: ['fqdn', 'dns name', 'host-fqdn'],
+    os: ['os', 'operating system', 'operating-system'],
+    desc: ['description'],
   };
   const INFO_LEVELS = new Set(['none', 'info', 'informational']);
+
+  // Compliance checks put "<check name>": [RESULT] at the start of their
+  // description, in both .nessus files and Tenable's CSV export.
+  const COMPLIANCE_DESC_RE = /^\s*(?:"([^"\n]{1,2000})"|([^\n:"]{1,2000}?))\s*:\s*\[(PASSED|FAILED|WARNING|ERROR|SKIPPED|INFO|N\/A)\]/i;
+  const DERIVED_COLUMNS = ['Compliance Check', 'Compliance Result'];
+
+  function parseComplianceDesc(desc) {
+    if (!desc || desc.indexOf('[') === -1) return null;
+    const m = COMPLIANCE_DESC_RE.exec(desc.length > 2100 ? desc.slice(0, 2100) : desc);
+    return m ? [(m[1] || m[2]).trim(), m[3].toUpperCase()] : null;
+  }
+
+  // Buckets: 0 passed, 1 failed, 2 warning, 3 other (error, skipped, …).
+  function complianceBucket(result) {
+    const r = result.trim().toUpperCase();
+    if (!r) return -1;
+    if (r === 'PASSED' || r === 'PASS') return 0;
+    if (r === 'FAILED' || r === 'FAIL') return 1;
+    if (r === 'WARNING' || r === 'WARN') return 2;
+    return 3;
+  }
+
+  // Buckets: 0 critical, 1 high, 2 medium, 3 low, 4 info, 5 other.
+  function severityBucket(risk) {
+    const r = risk.trim().toLowerCase();
+    if (r === 'critical') return 0;
+    if (r === 'high') return 1;
+    if (r === 'medium') return 2;
+    if (r === 'low') return 3;
+    if (INFO_LEVELS.has(r)) return 4;
+    return 5;
+  }
 
   function normalizeHeader(h) {
     return h.replace(/^﻿/, '').trim();
@@ -388,6 +429,8 @@ function mergeWorkerMain() {
     'BID', 'XREF', 'MSKB', 'Plugin Publication Date', 'Plugin Modification Date', 'Patch Publication Date',
     'Exploit Available', 'Metasploit', 'Core Impact', 'CANVAS', 'Plugin Family', 'Service',
     'IP Address', 'FQDN', 'NetBIOS Name', 'OS', 'MAC Address', 'Scan Name', 'Scan Start', 'Scan End',
+    'Compliance Check', 'Compliance Result', 'Compliance Actual Value', 'Compliance Policy Value',
+    'Compliance Reference', 'Compliance Audit File',
   ];
   const SEVERITY_NAMES = ['None', 'Low', 'Medium', 'High', 'Critical'];
   const XML_ENTITIES = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" };
@@ -568,6 +611,14 @@ function mergeWorkerMain() {
         one('exploit_framework_canvas'), a.pluginFamily || '', a.svc_name || '',
         host.ip, host.fqdn, host.netbios, host.os, host.mac, host.report, host.start, host.end,
       ];
+      let check = one('cm:compliance-check-name');
+      let result = one('cm:compliance-result');
+      if (!result) {
+        const parsed = parseComplianceDesc(one('description'));
+        if (parsed) { check = check || parsed[0]; result = parsed[1]; }
+      }
+      row.push(check, result, one('cm:compliance-actual-value'), one('cm:compliance-policy-value'),
+        one('cm:compliance-reference'), one('cm:compliance-audit-file'));
       const cves = f.cve;
       if (!cves || cves.length === 0) return this.onRow(row);
       for (const cve of cves) {
@@ -579,27 +630,42 @@ function mergeWorkerMain() {
     }
   }
 
-  // Reads just enough of a source to learn its columns.
+  // Reads just enough of a source to learn its columns and whether it holds
+  // compliance results. CSVs with compliance rows but no result column get
+  // two derived columns parsed from Description.
   async function probe(src) {
     if (src.kind === 'csv') {
       let headers = null;
-      const parser = new CsvStreamParser(row => { headers = row; return false; });
-      for await (const { text } of textChunks(src, PROBE_CHUNK)) {
+      let descIdx = -1;
+      let compliance = false;
+      const parser = new CsvStreamParser(row => {
+        if (!headers) {
+          headers = row.map(normalizeHeader);
+          descIdx = findColumn(headers, KEY_ALIASES.desc);
+          return descIdx !== -1;
+        }
+        if (parseComplianceDesc(row[descIdx] || '')) { compliance = true; return false; }
+      });
+      let read = 0;
+      for await (const { text, bytes } of textChunks(src, PROBE_CHUNK)) {
         parser.push(text);
-        if (headers) break;
+        read += bytes;
+        if (parser.stopped || read >= 2 * PROBE_CHUNK) break;
       }
       if (!headers) parser.end();
       if (!headers) throw new Error('File is empty or has no header row');
-      headers = headers.map(normalizeHeader);
-      return { headers, ...describeFile(headers) };
+      const hasResult = findColumn(headers, KEY_ALIASES.result) !== -1;
+      const derive = compliance && !hasResult && descIdx !== -1;
+      if (derive) headers = headers.concat(DERIVED_COLUMNS);
+      return { headers, ...describeFile(headers), compliance: compliance || hasResult, derive };
     }
     let head = '';
     for await (const { text } of textChunks(src, PROBE_CHUNK)) {
       head += text;
-      if (head.length >= 64 * 1024) break;
+      if (head.length >= 1024 * 1024) break;
     }
     if (!/<NessusClientData_v2[\s>]/.test(head)) throw new Error('Not a .nessus (NessusClientData_v2) file');
-    return { headers: NESSUS_COLUMNS.slice(), recognized: true };
+    return { headers: NESSUS_COLUMNS.slice(), recognized: true, compliance: /cm:compliance-|\.audit\b/.test(head) };
   }
 
   async function scanFile(file) {
@@ -876,17 +942,119 @@ function mergeWorkerMain() {
     return s.replace(BAD_XML_CHARS, '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
+  // Cell style indices (see stylesXml): header, title, bold, percent, note,
+  // severity / compliance labels and section headings.
+  const ST = {
+    header: 1, title: 2, bold: 3, pct: 4, note: 5,
+    critical: 6, high: 7, medium: 8, low: 9, info: 10,
+    passed: 11, failed: 12, warning: 13, other: 14, section: 15,
+  };
+  const SEVERITIES = [
+    ['Critical', ST.critical, '91243E'], ['High', ST.high, 'DD4B50'], ['Medium', ST.medium, 'F18C43'],
+    ['Low', ST.low, 'F8C851'], ['Info', ST.info, '67ACE1'], ['Other', ST.other, 'A6A6A6'],
+  ];
+  const COMPLIANCE_RESULTS = [
+    ['Passed', ST.passed, '2E9E5B'], ['Failed', ST.failed, 'C23B3B'],
+    ['Warning', ST.warning, 'F0A030'], ['Error / other', ST.other, 'A6A6A6'],
+  ];
+
+  function stylesXml() {
+    const font = (flags = '', size = 11, color = '') =>
+      `<font>${flags}<sz val="${size}"/>${color ? `<color rgb="FF${color}"/>` : ''}<name val="Calibri"/><family val="2"/></font>`;
+    // 0 normal, 1 bold, 2 title, 3 note, 4 bold white, 5 section heading
+    const fonts = [font(), font('<b/>'), font('<b/>', 16, '1F3864'), font('<i/>', 10, '666666'),
+      font('<b/>', 11, 'FFFFFF'), font('<b/>', 12, '1F3864')];
+    const solid = rgb => `<fill><patternFill patternType="solid"><fgColor rgb="FF${rgb}"/><bgColor indexed="64"/></patternFill></fill>`;
+    const fills = ['<fill><patternFill patternType="none"/></fill>', '<fill><patternFill patternType="gray125"/></fill>',
+      solid('D9E1F2'), solid('91243E'), solid('DD4B50'), solid('F18C43'), solid('F8C851'), solid('67ACE1'),
+      solid('2E9E5B'), solid('C23B3B'), solid('F0A030'), solid('D9D9D9')];
+    const xf = (font, fill, numFmt = 0) =>
+      `<xf numFmtId="${numFmt}" fontId="${font}" fillId="${fill}" borderId="0" xfId="0"` +
+      `${font ? ' applyFont="1"' : ''}${fill ? ' applyFill="1"' : ''}${numFmt ? ' applyNumberFormat="1"' : ''}/>`;
+    // Order must match ST.
+    const xfs = [
+      xf(0, 0), xf(1, 2), xf(2, 0), xf(1, 0), xf(0, 0, 10), xf(3, 0),
+      xf(4, 3), xf(4, 4), xf(4, 5), xf(1, 6), xf(1, 7),   // critical, high, medium, low, info
+      xf(4, 8), xf(4, 9), xf(1, 10), xf(1, 11), xf(5, 0),  // passed, failed, warning, other, section
+    ];
+    return XML_DECL + `<styleSheet xmlns="${NS_MAIN}">` +
+      `<fonts count="${fonts.length}">${fonts.join('')}</fonts>` +
+      `<fills count="${fills.length}">${fills.join('')}</fills>` +
+      '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>' +
+      '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+      `<cellXfs count="${xfs.length}">${xfs.join('')}</cellXfs>` +
+      '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>';
+  }
+
+  const escAttr = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  // DrawingML chart: { type: 'bar' | 'doughnut', title, sheet, catRange, valRange, cats, vals, colors }
+  function chartXml(c) {
+    const ref = r => `'${c.sheet}'!${r}`;
+    const pts = (arr, num) => `<c:ptCount val="${arr.length}"/>` +
+      arr.map((v, i) => `<c:pt idx="${i}"><c:v>${num ? v : xmlEscape(String(v))}</c:v></c:pt>`).join('');
+    const dPts = c.colors.map((rgb, i) =>
+      `<c:dPt><c:idx val="${i}"/>${c.type === 'bar' ? '<c:invertIfNegative val="0"/>' : ''}<c:bubble3D val="0"/>` +
+      `<c:spPr><a:solidFill><a:srgbClr val="${rgb}"/></a:solidFill></c:spPr></c:dPt>`).join('');
+    const labels = `<c:dLbls><c:showLegendKey val="0"/><c:showVal val="${c.type === 'bar' ? 1 : 0}"/>` +
+      `<c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="${c.type === 'bar' ? 0 : 1}"/>` +
+      '<c:showBubbleSize val="0"/></c:dLbls>';
+    const ser = '<c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:v>Count</c:v></c:tx>' +
+      (c.type === 'bar' ? '<c:invertIfNegative val="0"/>' : '') + dPts + labels +
+      `<c:cat><c:strRef><c:f>${ref(c.catRange)}</c:f><c:strCache>${pts(c.cats, false)}</c:strCache></c:strRef></c:cat>` +
+      `<c:val><c:numRef><c:f>${ref(c.valRange)}</c:f><c:numCache><c:formatCode>General</c:formatCode>${pts(c.vals, true)}</c:numCache></c:numRef></c:val></c:ser>`;
+    const plot = c.type === 'bar'
+      ? '<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:varyColors val="0"/>' + ser +
+        '<c:gapWidth val="60"/><c:axId val="5001"/><c:axId val="5002"/></c:barChart>' +
+        '<c:catAx><c:axId val="5001"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/>' +
+        '<c:axPos val="b"/><c:numFmt formatCode="General" sourceLinked="0"/><c:majorTickMark val="none"/>' +
+        '<c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/><c:crossAx val="5002"/><c:crosses val="autoZero"/>' +
+        '<c:auto val="1"/><c:lblAlgn val="ctr"/><c:lblOffset val="100"/><c:noMultiLvlLbl val="0"/></c:catAx>' +
+        '<c:valAx><c:axId val="5002"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/>' +
+        '<c:axPos val="l"/><c:majorGridlines/><c:numFmt formatCode="General" sourceLinked="1"/>' +
+        '<c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>' +
+        '<c:crossAx val="5001"/><c:crosses val="autoZero"/><c:crossBetween val="between"/></c:valAx>'
+      : '<c:doughnutChart><c:varyColors val="1"/>' + ser + '<c:firstSliceAng val="0"/><c:holeSize val="55"/></c:doughnutChart>';
+    return XML_DECL +
+      '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" ' +
+      `xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${NS_REL}">` +
+      '<c:roundedCorners val="0"/><c:chart>' +
+      '<c:title><c:tx><c:rich><a:bodyPr/><a:p><a:pPr><a:defRPr sz="1200" b="1"/></a:pPr>' +
+      `<a:r><a:rPr lang="en-US" sz="1200" b="1"/><a:t>${xmlEscape(c.title)}</a:t></a:r></a:p></c:rich></c:tx>` +
+      '<c:overlay val="0"/></c:title><c:autoTitleDeleted val="0"/>' +
+      `<c:plotArea><c:layout/>${plot}</c:plotArea>` +
+      (c.type === 'bar' ? '' : '<c:legend><c:legendPos val="r"/><c:overlay val="0"/></c:legend>') +
+      '<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart></c:chartSpace>';
+  }
+
+  function drawingXml(anchors) {
+    return XML_DECL +
+      '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" ' +
+      'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">' +
+      anchors.map((an, i) =>
+        '<xdr:twoCellAnchor editAs="oneCell">' +
+        `<xdr:from><xdr:col>${an.from[0]}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${an.from[1]}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>` +
+        `<xdr:to><xdr:col>${an.to[0]}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${an.to[1]}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>` +
+        `<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="${i + 2}" name="Chart ${i + 1}"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>` +
+        '<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>' +
+        '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">' +
+        `<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="${NS_REL}" r:id="rId${i + 1}"/>` +
+        '</a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>').join('') +
+      '</xdr:wsDr>';
+  }
+
   class XlsxOutput {
-    constructor(sink, cols) {
+    constructor(sink, cols, withSummary) {
       this.sink = sink;
       this.zip = new ZipWriter(sink);
       this.mime = XLSX_MIME;
       this.cols = cols;
+      this.withSummary = withSummary;
       this.letters = cols.map((_, i) => colLetter(i));
       this.queue = [];          // row XML and NEW_SHEET markers awaiting flush()
       this.pending = '';
       this.pendingLen = 0;
-      this.sheetRows = [0];     // data rows per sheet
+      this.sheetRows = [0];     // data rows per findings sheet
       this.sheetChars = 0;
       this.stream = null;
       this.truncated = 0;
@@ -899,7 +1067,7 @@ function mergeWorkerMain() {
         v = v.slice(0, XLSX_MAX_CELL - 12) + ' [truncated]';
         this.truncated++;
       }
-      return `<c r="${ref}"${style ? ' s="1"' : ''} t="inlineStr"><is><t xml:space="preserve">${xmlEscape(v)}</t></is></c>`;
+      return `<c r="${ref}"${style ? ` s="${style}"` : ''} t="inlineStr"><is><t xml:space="preserve">${xmlEscape(v)}</t></is></c>`;
     }
 
     rowXml(values, r, style) {
@@ -917,7 +1085,7 @@ function mergeWorkerMain() {
         this.sheetChars = 0;
       }
       const sheet = this.sheetRows.length - 1;
-      const xml = this.rowXml(values, ++this.sheetRows[sheet] + 1, false);
+      const xml = this.rowXml(values, ++this.sheetRows[sheet] + 1, 0);
       this.pending += xml;
       this.pendingLen += xml.length;
       this.sheetChars += xml.length;
@@ -927,20 +1095,24 @@ function mergeWorkerMain() {
 
     sheetName(i) { return i === 0 ? 'Findings' : `Findings (${i + 1})`; }
 
+    sheetHead({ widths, freeze, selected }) {
+      const cols = widths.map((w, j) => `<col min="${j + 1}" max="${j + 1}" width="${w}" customWidth="1"/>`).join('');
+      return XML_DECL + `<worksheet xmlns="${NS_MAIN}" xmlns:r="${NS_REL}">` +
+        `<sheetViews><sheetView workbookViewId="0"${selected ? ' tabSelected="1"' : ''}>` +
+        (freeze
+          ? '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/>'
+          : '<selection activeCell="A1" sqref="A1"/>') +
+        `</sheetView></sheetViews><sheetFormatPr defaultRowHeight="15"/>${cols ? `<cols>${cols}</cols>` : ''}<sheetData>`;
+    }
+
     async beginSheet() {
       const i = this.stream ? this.stream.index + 1 : 0;
       const stream = this.zip.openStream(`xl/worksheets/sheet${i + 1}.xml`);
       stream.index = i;
       this.stream = stream;
-      const cols = this.cols.map((c, j) =>
-        `<col min="${j + 1}" max="${j + 1}" width="${COLUMN_WIDTHS[c.toLowerCase()] || 16}" customWidth="1"/>`).join('');
-      await stream.write(
-        XML_DECL + `<worksheet xmlns="${NS_MAIN}" xmlns:r="${NS_REL}">` +
-        `<sheetViews><sheetView workbookViewId="0"${i === 0 ? ' tabSelected="1"' : ''}>` +
-        '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>' +
-        '<selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>' +
-        `<sheetFormatPr defaultRowHeight="15"/><cols>${cols}</cols><sheetData>` +
-        this.rowXml(this.cols, 1, true));
+      const widths = this.cols.map(c => COLUMN_WIDTHS[c.toLowerCase()] || 16);
+      await stream.write(this.sheetHead({ widths, freeze: true, selected: i === 0 && !this.withSummary }) +
+        this.rowXml(this.cols, 1, ST.header));
     }
 
     async endSheet() {
@@ -964,13 +1136,76 @@ function mergeWorkerMain() {
       await this.sink.flush();
     }
 
-    async finish() {
+    // Writes a summary sheet described as { name, widths, rows, freeze, filter, charts }.
+    // Cells are strings, numbers, null, or { v, s } with a style index.
+    async writeSpecSheet(spec, fileIndex, selected) {
+      const stream = this.zip.openStream(`xl/worksheets/sheet${fileIndex}.xml`);
+      let xml = this.sheetHead({ widths: spec.widths, freeze: spec.freeze, selected });
+      for (let r = 0; r < spec.rows.length; r++) {
+        const cells = spec.rows[r];
+        if (!cells || !cells.length) continue;
+        xml += `<row r="${r + 1}">`;
+        for (let c = 0; c < cells.length; c++) {
+          let cell = cells[c];
+          let s = 0;
+          if (cell !== null && typeof cell === 'object') { s = cell.s || 0; cell = cell.v; }
+          if (cell === null || cell === undefined || cell === '') continue;
+          const ref = colLetter(c) + (r + 1);
+          if (typeof cell === 'number') {
+            xml += `<c r="${ref}"${s ? ` s="${s}"` : ''}><v>${Number.isFinite(cell) ? cell : 0}</v></c>`;
+          } else {
+            let v = String(cell);
+            if (v.length > XLSX_MAX_CELL) v = v.slice(0, XLSX_MAX_CELL - 12) + ' [truncated]';
+            xml += `<c r="${ref}"${s ? ` s="${s}"` : ''} t="inlineStr"><is><t xml:space="preserve">${xmlEscape(v)}</t></is></c>`;
+          }
+        }
+        xml += '</row>';
+        if (xml.length >= FLUSH_SIZE) { await stream.write(xml); xml = ''; await this.sink.flush(); }
+      }
+      xml += '</sheetData>';
+      if (spec.filter) xml += `<autoFilter ref="${spec.filter}"/>`;
+      if (spec.charts && spec.charts.length) xml += '<drawing r:id="rId1"/>';
+      await stream.write(xml + '</worksheet>');
+      await stream.close();
+      await this.sink.flush();
+    }
+
+    // summary: { sheets: [spec, …] }, placed before the findings sheets.
+    async finish(summary) {
       await this.flush();
       await this.endSheet();
-      const n = this.sheetRows.length;
+      const findings = this.sheetRows.length;
       const lastCol = this.letters[this.letters.length - 1];
-      const idx = [...Array(n).keys()];
-      const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      const specs = summary ? summary.sheets : [];
+
+      // Workbook order is summaries first, then findings. Findings were
+      // already streamed as sheet1..N, so summaries take the next numbers.
+      const book = [];
+      const drawings = [];
+      let chartNo = 0;
+      for (let k = 0; k < specs.length; k++) {
+        const spec = specs[k];
+        const file = findings + k + 1;
+        await this.writeSpecSheet(spec, file, k === 0);
+        book.push({ name: spec.name, file, filter: spec.filter ? spec.filter.replace(/([A-Z]+)(\d+)/g, '$$$1$$$2') : null });
+        if (spec.charts && spec.charts.length) {
+          const d = drawings.length + 1;
+          const charts = spec.charts.map(() => ++chartNo);
+          spec.charts.forEach((an, j) => this.zip.addFile(`xl/charts/chart${charts[j]}.xml`, chartXml({ ...an.chart, sheet: spec.name })));
+          this.zip.addFile(`xl/drawings/drawing${d}.xml`, drawingXml(spec.charts));
+          this.zip.addFile(`xl/drawings/_rels/drawing${d}.xml.rels`, XML_DECL +
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+            charts.map((n, j) => `<Relationship Id="rId${j + 1}" Type="${NS_REL}/chart" Target="../charts/chart${n}.xml"/>`).join('') +
+            '</Relationships>');
+          this.zip.addFile(`xl/worksheets/_rels/sheet${file}.xml.rels`, XML_DECL +
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+            `<Relationship Id="rId1" Type="${NS_REL}/drawing" Target="../drawings/drawing${d}.xml"/></Relationships>`);
+          drawings.push({ d, charts });
+        }
+      }
+      for (let i = 0; i < findings; i++) {
+        book.push({ name: this.sheetName(i), file: i + 1, filter: `$A$1:$${lastCol}$${this.sheetRows[i] + 1}` });
+      }
 
       this.zip.addFile('[Content_Types].xml', XML_DECL +
         '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
@@ -978,36 +1213,273 @@ function mergeWorkerMain() {
         '<Default Extension="xml" ContentType="application/xml"/>' +
         '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
         '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
-        idx.map(i => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('') +
+        book.map(b => `<Override PartName="/xl/worksheets/sheet${b.file}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('') +
+        drawings.map(({ d, charts }) =>
+          `<Override PartName="/xl/drawings/drawing${d}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>` +
+          charts.map(n => `<Override PartName="/xl/charts/chart${n}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>`).join('')).join('') +
         '</Types>');
       this.zip.addFile('_rels/.rels', XML_DECL +
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
         `<Relationship Id="rId1" Type="${NS_REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
       this.zip.addFile('xl/workbook.xml', XML_DECL +
-        `<workbook xmlns="${NS_MAIN}" xmlns:r="${NS_REL}"><bookViews><workbookView/></bookViews><sheets>` +
-        idx.map(i => `<sheet name="${esc(this.sheetName(i))}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('') +
+        `<workbook xmlns="${NS_MAIN}" xmlns:r="${NS_REL}"><bookViews><workbookView activeTab="0"/></bookViews><sheets>` +
+        book.map((b, i) => `<sheet name="${escAttr(b.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('') +
         '</sheets><definedNames>' +
-        idx.map(i => `<definedName name="_xlnm._FilterDatabase" localSheetId="${i}" hidden="1">` +
-          `${esc(`'${this.sheetName(i)}'`)}!$A$1:$${lastCol}$${this.sheetRows[i] + 1}</definedName>`).join('') +
+        book.map((b, i) => (b.filter
+          ? `<definedName name="_xlnm._FilterDatabase" localSheetId="${i}" hidden="1">${escAttr(`'${b.name}'`)}!${b.filter}</definedName>`
+          : '')).join('') +
         '</definedNames></workbook>');
       this.zip.addFile('xl/_rels/workbook.xml.rels', XML_DECL +
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-        idx.map(i => `<Relationship Id="rId${i + 1}" Type="${NS_REL}/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join('') +
-        `<Relationship Id="rId${n + 1}" Type="${NS_REL}/styles" Target="styles.xml"/></Relationships>`);
-      this.zip.addFile('xl/styles.xml', XML_DECL +
-        `<styleSheet xmlns="${NS_MAIN}">` +
-        '<fonts count="2"><font><sz val="11"/><name val="Calibri"/><family val="2"/></font>' +
-        '<font><b/><sz val="11"/><name val="Calibri"/><family val="2"/></font></fonts>' +
-        '<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>' +
-        '<fill><patternFill patternType="solid"><fgColor rgb="FFD9E1F2"/><bgColor indexed="64"/></patternFill></fill></fills>' +
-        '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>' +
-        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
-        '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' +
-        '<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs>' +
-        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>');
+        book.map((b, i) => `<Relationship Id="rId${i + 1}" Type="${NS_REL}/worksheet" Target="worksheets/sheet${b.file}.xml"/>`).join('') +
+        `<Relationship Id="rId${book.length + 1}" Type="${NS_REL}/styles" Target="styles.xml"/></Relationships>`);
+      this.zip.addFile('xl/styles.xml', stylesXml());
       this.zip.finish();
-      return { sheets: n, truncatedCells: this.truncated };
+      return { sheets: findings, summarySheets: specs.map(s => s.name), truncatedCells: this.truncated };
     }
+  }
+
+  // ---------------------------------------------------------------------
+  // Summary / dashboard. Aggregates are collected for every output row and
+  // turned into sheet specs when the workbook is finished.
+  // ---------------------------------------------------------------------
+  const MAX_CVES_PER_PLUGIN = 50;
+
+  class SummaryCollector {
+    constructor() {
+      this.sev = [0, 0, 0, 0, 0, 0];
+      this.comp = [0, 0, 0, 0];
+      this.hosts = new Map();       // host -> { ip, fqdn, os, sev[6], comp[4] }
+      this.plugins = new Map();     // plugin id -> { name, family, sev, rows, hosts, cves }
+      this.checks = new Map();      // check name -> { audit, comp[4] }
+      this.pairs = new HashSet64(); // (plugin, host) pairs, for "hosts affected"
+      this.sevHosts = [new Set(), new Set(), new Set(), new Set(), new Set(), new Set()];
+    }
+
+    host(name, ip, fqdn, os) {
+      let h = this.hosts.get(name);
+      if (!h) {
+        h = { ip: '', fqdn: '', os: '', sev: [0, 0, 0, 0, 0, 0], comp: [0, 0, 0, 0] };
+        this.hosts.set(name, h);
+      }
+      if (!h.ip && ip) h.ip = ip;
+      if (!h.fqdn && fqdn) h.fqdn = fqdn;
+      if (!h.os && os) h.os = os;
+      return h;
+    }
+
+    addVuln(hostName, h, bucket, pluginId, name, family, cve) {
+      this.sev[bucket]++;
+      if (h) { h.sev[bucket]++; this.sevHosts[bucket].add(hostName); }
+      if (!pluginId) return;
+      let p = this.plugins.get(pluginId);
+      if (!p) {
+        p = { name, family, sev: bucket, rows: 0, hosts: 0, cves: new Set() };
+        this.plugins.set(pluginId, p);
+      }
+      p.rows++;
+      if (bucket < p.sev) p.sev = bucket;
+      if (!p.name && name) p.name = name;
+      if (!p.family && family) p.family = family;
+      if (cve && p.cves.size < MAX_CVES_PER_PLUGIN) p.cves.add(cve);
+      if (hostName) {
+        const [a, b] = hash64(pluginId + '\x1f' + hostName);
+        if (this.pairs.add(a, b)) p.hosts++;
+      }
+    }
+
+    addCompliance(h, bucket, check, audit) {
+      this.comp[bucket]++;
+      if (h) h.comp[bucket]++;
+      const key = check || '(unnamed check)';
+      let c = this.checks.get(key);
+      if (!c) { c = { audit: audit || '', comp: [0, 0, 0, 0] }; this.checks.set(key, c); }
+      c.comp[bucket]++;
+    }
+
+    get vulnTotal() { return this.sev.reduce((a, b) => a + b, 0); }
+    get compTotal() { return this.comp.reduce((a, b) => a + b, 0); }
+  }
+
+  const ratio = (n, d) => (d ? n / d : 0);
+  const asNumber = v => (NUMERIC.test(v) ? Number(v) : v);
+  const passRate = comp => ratio(comp[0], comp[0] + comp[1] + comp[2]);
+  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+  function buildSummary(agg, meta) {
+    const sheets = [];
+    const hasVulns = agg.vulnTotal > 0;
+    const hasComp = agg.compTotal > 0;
+    const sevRows = SEVERITIES.filter((s, i) => i < 5 || agg.sev[5] > 0);
+    const compScore = passRate(agg.comp);
+
+    const hostList = [...agg.hosts].sort((x, y) => {
+      const a = x[1], b = y[1];
+      for (let i = 0; i < 4; i++) if (a.sev[i] !== b.sev[i]) return b.sev[i] - a.sev[i];
+      if (a.comp[1] !== b.comp[1]) return b.comp[1] - a.comp[1];
+      return collator.compare(x[0], y[0]);
+    });
+    const pluginList = [...agg.plugins].sort((x, y) =>
+      x[1].sev - y[1].sev || y[1].hosts - x[1].hosts || y[1].rows - x[1].rows || collator.compare(x[0], y[0]));
+    const checkList = [...agg.checks].sort((x, y) =>
+      y[1].comp[1] - x[1].comp[1] || y[1].comp[2] - x[1].comp[2] || collator.compare(x[0], y[0]));
+
+    // --- Dashboard: tables in columns A–G, charts from column I.
+    const rows = [];
+    const charts = [];
+    const add = (...cells) => rows.push(cells);
+    const blank = () => rows.push([]);
+    add({ v: 'Tenable Report — Merged Summary', s: ST.title });
+    add({ v: `Generated ${meta.generated} from ${meta.reports} report${meta.reports === 1 ? '' : 's'}`, s: ST.note });
+    blank();
+    add({ v: 'Overview', s: ST.section });
+    add({ v: 'Metric', s: ST.header }, { v: 'Value', s: ST.header });
+    add('Reports merged', meta.reports);
+    add('Hosts', agg.hosts.size);
+    if (hasVulns) add('Vulnerability findings', agg.vulnTotal);
+    if (hasVulns) add('Unique vulnerabilities (plugins)', agg.plugins.size);
+    if (hasComp) add('Compliance checks evaluated', agg.compTotal);
+    if (hasComp) add({ v: 'Compliance score', s: ST.bold }, { v: compScore, s: ST.pct });
+    add('Duplicates removed', meta.duplicates);
+    add('Rows excluded (informational / rules)', meta.excluded);
+    blank();
+
+    let chartRow = 3; // zero-based anchor row for the next chart
+    if (hasVulns) {
+      add({ v: 'Vulnerabilities by severity', s: ST.section });
+      add({ v: 'Severity', s: ST.header }, { v: 'Findings', s: ST.header }, { v: '% of findings', s: ST.header }, { v: 'Hosts affected', s: ST.header });
+      const first = rows.length + 1;
+      for (const sev of sevRows) {
+        const i = SEVERITIES.indexOf(sev);
+        add({ v: sev[0], s: sev[1] }, agg.sev[i], { v: ratio(agg.sev[i], agg.vulnTotal), s: ST.pct }, agg.sevHosts[i].size);
+      }
+      const last = rows.length;
+      add({ v: 'Total', s: ST.bold }, { v: agg.vulnTotal, s: ST.bold }, { v: 1, s: ST.pct });
+      blank();
+      charts.push({
+        from: [8, chartRow], to: [16, chartRow + 17],
+        chart: {
+          type: 'bar', title: 'Vulnerability findings by severity', catRange: `$A$${first}:$A$${last}`, valRange: `$B$${first}:$B$${last}`,
+          cats: sevRows.map(s => s[0]), vals: sevRows.map(s => agg.sev[SEVERITIES.indexOf(s)]), colors: sevRows.map(s => s[2]),
+        },
+      });
+      chartRow += 19;
+    }
+
+    if (hasComp) {
+      add({ v: 'Compliance results', s: ST.section });
+      add({ v: 'Result', s: ST.header }, { v: 'Checks', s: ST.header }, { v: '% of checks', s: ST.header });
+      const first = rows.length + 1;
+      COMPLIANCE_RESULTS.forEach(([label, style], i) => add({ v: label, s: style }, agg.comp[i], { v: ratio(agg.comp[i], agg.compTotal), s: ST.pct }));
+      const last = rows.length;
+      add({ v: 'Total', s: ST.bold }, { v: agg.compTotal, s: ST.bold }, { v: 1, s: ST.pct });
+      add({ v: 'Compliance score', s: ST.bold }, { v: compScore, s: ST.pct });
+      add({ v: 'Score = Passed ÷ (Passed + Failed + Warning)', s: ST.note });
+      blank();
+      charts.push({
+        from: [8, chartRow], to: [16, chartRow + 17],
+        chart: {
+          type: 'doughnut', title: 'Compliance results', catRange: `$A$${first}:$A$${last}`, valRange: `$B$${first}:$B$${last}`,
+          cats: COMPLIANCE_RESULTS.map(r => r[0]), vals: agg.comp.slice(), colors: COMPLIANCE_RESULTS.map(r => r[2]),
+        },
+      });
+    }
+
+    if (hostList.length) {
+      add({ v: 'Top 10 hosts by risk', s: ST.section });
+      const head = [{ v: 'Host', s: ST.header }];
+      if (hasVulns) head.push(...['Critical', 'High', 'Medium', 'Low'].map(v => ({ v, s: ST.header })));
+      if (hasComp) head.push({ v: 'Failed checks', s: ST.header }, { v: 'Pass rate', s: ST.header });
+      add(...head);
+      for (const [name, h] of hostList.slice(0, 10)) {
+        const cells = [name];
+        if (hasVulns) cells.push(...h.sev.slice(0, 4));
+        if (hasComp) cells.push(h.comp[1], h.comp.some(Boolean) ? { v: passRate(h.comp), s: ST.pct } : null);
+        add(...cells);
+      }
+      blank();
+    }
+    if (hasVulns && pluginList.length) {
+      add({ v: 'Top 10 vulnerabilities', s: ST.section });
+      add({ v: 'Name', s: ST.header }, { v: 'Plugin ID', s: ST.header }, { v: 'Severity', s: ST.header }, { v: 'Hosts', s: ST.header });
+      for (const [id, p] of pluginList.slice(0, 10)) {
+        add(p.name || id, asNumber(id), { v: SEVERITIES[p.sev][0], s: SEVERITIES[p.sev][1] }, p.hosts);
+      }
+      blank();
+    }
+    if (hasComp && checkList.length) {
+      add({ v: 'Top 10 failed compliance checks', s: ST.section });
+      add({ v: 'Check', s: ST.header }, { v: 'Failed', s: ST.header }, { v: 'Warning', s: ST.header }, { v: 'Passed', s: ST.header }, { v: 'Pass rate', s: ST.header });
+      for (const [check, c] of checkList.slice(0, 10)) add(check, c.comp[1], c.comp[2], c.comp[0], { v: passRate(c.comp), s: ST.pct });
+    }
+    sheets.push({ name: 'Dashboard', widths: [58, 14, 14, 14, 14, 14, 14, 3], rows, freeze: false, charts });
+
+    // --- Hosts
+    if (hostList.length) {
+      const anyIp = hostList.some(([, h]) => h.ip);
+      const anyFqdn = hostList.some(([, h]) => h.fqdn);
+      const anyOs = hostList.some(([, h]) => h.os);
+      const head = ['Host'];
+      const widths = [22];
+      if (anyIp) { head.push('IP Address'); widths.push(16); }
+      if (anyFqdn) { head.push('FQDN'); widths.push(30); }
+      if (anyOs) { head.push('OS'); widths.push(34); }
+      if (hasVulns) { head.push('Critical', 'High', 'Medium', 'Low', 'Info', 'Total'); widths.push(10, 10, 10, 10, 10, 10); }
+      if (hasComp) { head.push('Passed', 'Failed', 'Warning', 'Error / other', 'Pass rate'); widths.push(10, 10, 10, 13, 11); }
+      const hostRows = [head.map(v => ({ v, s: ST.header }))];
+      for (const [name, h] of hostList.slice(0, XLSX_MAX_ROWS)) {
+        const cells = [name];
+        if (anyIp) cells.push(h.ip);
+        if (anyFqdn) cells.push(h.fqdn);
+        if (anyOs) cells.push(h.os);
+        if (hasVulns) cells.push(...h.sev.slice(0, 5), h.sev.reduce((a, b) => a + b, 0));
+        if (hasComp) cells.push(...h.comp, h.comp.some(Boolean) ? { v: passRate(h.comp), s: ST.pct } : null);
+        hostRows.push(cells);
+      }
+      sheets.push({ name: 'Hosts', widths, rows: hostRows, freeze: true, filter: `A1:${colLetter(head.length - 1)}${hostRows.length}` });
+    }
+
+    // --- Vulnerabilities
+    if (hasVulns && pluginList.length) {
+      const anyFamily = pluginList.some(([, p]) => p.family);
+      const head = ['Plugin ID', 'Name', ...(anyFamily ? ['Plugin Family'] : []), 'Severity', 'Hosts Affected', 'Occurrences', 'CVEs'];
+      const vulnRows = [head.map(v => ({ v, s: ST.header }))];
+      for (const [id, p] of pluginList.slice(0, XLSX_MAX_ROWS)) {
+        vulnRows.push([asNumber(id), p.name, ...(anyFamily ? [p.family] : []),
+          { v: SEVERITIES[p.sev][0], s: SEVERITIES[p.sev][1] }, p.hosts, p.rows,
+          [...p.cves].join(', ') + (p.cves.size >= MAX_CVES_PER_PLUGIN ? ', …' : '')]);
+      }
+      sheets.push({
+        name: 'Vulnerabilities', widths: [10, 60, ...(anyFamily ? [24] : []), 10, 15, 13, 40], rows: vulnRows,
+        freeze: true, filter: `A1:${colLetter(head.length - 1)}${vulnRows.length}`,
+      });
+    }
+
+    // --- Compliance
+    if (hasComp) {
+      const anyAudit = checkList.some(([, c]) => c.audit);
+      const head = ['Check', ...(anyAudit ? ['Audit File'] : []), 'Passed', 'Failed', 'Warning', 'Error / other', 'Total', 'Pass rate'];
+      const compRows = [head.map(v => ({ v, s: ST.header }))];
+      for (const [check, c] of checkList.slice(0, XLSX_MAX_ROWS)) {
+        compRows.push([check, ...(anyAudit ? [c.audit] : []), ...c.comp, c.comp.reduce((a, b) => a + b, 0), { v: passRate(c.comp), s: ST.pct }]);
+      }
+      sheets.push({
+        name: 'Compliance', widths: [80, ...(anyAudit ? [30] : []), 10, 10, 10, 13, 10, 11], rows: compRows,
+        freeze: true, filter: `A1:${colLetter(head.length - 1)}${compRows.length}`,
+      });
+    }
+
+    // --- Sources
+    const srcHead = ['Report', 'Type', 'Rows read', 'Rows written', 'Duplicates removed', 'Info excluded', 'Removed by rules', 'Status'];
+    const srcRows = [srcHead.map(v => ({ v, s: ST.header }))];
+    meta.sources.forEach((src, i) => {
+      const st = meta.perFile[i] || {};
+      srcRows.push([src.name, src.kind === 'nessus' ? '.nessus' : 'CSV', st.rowsIn || 0, st.rowsOut || 0,
+        st.duplicates || 0, st.filtered || 0, st.excluded || 0, st.error ? `Error: ${st.error}` : 'OK']);
+    });
+    sheets.push({ name: 'Sources', widths: [60, 9, 12, 13, 18, 13, 16, 30], rows: srcRows, freeze: true, filter: `A1:H${srcRows.length}` });
+
+    return { sheets };
   }
 
   // ---------------------------------------------------------------------
@@ -1032,14 +1504,15 @@ function mergeWorkerMain() {
     if (options.format === 'xlsx' && typeof CompressionStream !== 'function') {
       throw new Error('This browser cannot create .xlsx files. Use a current Chrome, Edge, Firefox or Safari, or choose CSV output.');
     }
-    const out = options.format === 'xlsx' ? new XlsxOutput(sink, outCols) : new CsvOutput(sink, outCols, options.bom);
+    const withSummary = options.format === 'xlsx' && options.summary !== false;
+    const out = options.format === 'xlsx' ? new XlsxOutput(sink, outCols, withSummary) : new CsvOutput(sink, outCols, options.bom);
 
     const totalBytes = sources.reduce((s, src) => s + sourceBytes(src), 0);
     let bytesDone = 0;
     let lastProgress = 0;
     const seen = options.dedupe === 'none' ? null : new HashSet64();
-    const hosts = new Set();
-    const severity = Object.create(null);
+    const agg = new SummaryCollector();
+    const severity = Object.create(null); // vulnerability rows by Risk label, for the page
     const totals = { rowsIn: 0, rowsOut: 0, duplicates: 0, filtered: 0, excluded: 0, malformed: 0 };
     const rules = compileRules(options.rules);
     const ruleHits = rules.map(() => 0);
@@ -1071,11 +1544,17 @@ function mergeWorkerMain() {
           fRules = rules.map(r => ({ ...r, col: lower.indexOf(r.key) })).filter(r => r.col !== -1);
         };
 
+        const cell = (row, k) => (fKey[k] === -1 ? '' : (row[fKey[k]] || '').trim());
+
         const handleRow = row => {
           stats.rowsIn++;
           if (row.length !== fileCols) stats.malformed++;
 
-          if (options.excludeInfo && fKey.risk !== -1) {
+          // Compliance results are never "informational": a PASSED check has
+          // Risk None, but dropping it would skew the pass rate.
+          const compBucket = fKey.result === -1 ? -1 : complianceBucket(row[fKey.result] || '');
+
+          if (options.excludeInfo && compBucket === -1 && fKey.risk !== -1) {
             const sev = (row[fKey.risk] || '').trim().toLowerCase();
             if (INFO_LEVELS.has(sev)) { stats.filtered++; return; }
           }
@@ -1092,8 +1571,10 @@ function mergeWorkerMain() {
           if (seen) {
             let key;
             if (options.dedupe === 'key' && fKey.plugin !== -1 && fKey.host !== -1) {
-              const g = k => (fKey[k] === -1 ? '' : (row[fKey[k]] || '').trim().toLowerCase());
-              key = g('plugin') + '\x1f' + g('host') + '\x1f' + g('protocol') + '\x1f' + g('port') + '\x1f' + g('cve');
+              // Compliance checks share one plugin ID per audit, so the check
+              // name is part of what makes a finding distinct.
+              const g = k => cell(row, k).toLowerCase();
+              key = g('plugin') + '\x1f' + g('host') + '\x1f' + g('protocol') + '\x1f' + g('port') + '\x1f' + g('cve') + '\x1f' + g('check');
             } else {
               // Exact duplicate: compare the whole source row.
               key = row.join('\x1f');
@@ -1111,13 +1592,14 @@ function mergeWorkerMain() {
           out.row(values);
           stats.rowsOut++;
 
-          if (fKey.host !== -1) {
-            const h = row[fKey.host];
-            if (h) hosts.add(h.trim());
-          }
-          if (fKey.risk !== -1) {
-            const s = (row[fKey.risk] || '').trim() || 'Unspecified';
-            severity[s] = (severity[s] || 0) + 1;
+          const hostName = cell(row, 'host');
+          const h = hostName ? agg.host(hostName, cell(row, 'ip'), cell(row, 'fqdn'), cell(row, 'os')) : null;
+          if (compBucket !== -1) {
+            agg.addCompliance(h, compBucket, cell(row, 'check'), cell(row, 'audit'));
+          } else {
+            const risk = cell(row, 'risk');
+            agg.addVuln(hostName, h, severityBucket(risk), cell(row, 'plugin'), cell(row, 'name'), cell(row, 'family'), cell(row, 'cve'));
+            if (fKey.risk !== -1) severity[risk || 'Unspecified'] = (severity[risk || 'Unspecified'] || 0) + 1;
           }
         };
 
@@ -1126,9 +1608,28 @@ function mergeWorkerMain() {
           setHeaders(NESSUS_COLUMNS);
           parser = new NessusStreamParser(handleRow);
         } else {
+          // CSVs holding compliance results without a result column get
+          // "Compliance Check" / "Compliance Result" parsed from Description.
+          let rawCols = 0;
+          let descIdx = -1;
           parser = new CsvStreamParser(row => {
-            if (map === null) setHeaders(row.map(normalizeHeader));
-            else handleRow(row);
+            if (map === null) {
+              let headers = row.map(normalizeHeader);
+              rawCols = headers.length;
+              if (src.derive) {
+                descIdx = findColumn(headers, KEY_ALIASES.desc);
+                headers = headers.concat(DERIVED_COLUMNS);
+              }
+              setHeaders(headers);
+            } else if (src.derive) {
+              // Normalise the length first so the derived values land in their columns.
+              if (row.length !== rawCols) { stats.malformed++; row.length = rawCols; }
+              const parsed = parseComplianceDesc(row[descIdx] || '') || ['', ''];
+              row.push(parsed[0], parsed[1]);
+              handleRow(row);
+            } else {
+              handleRow(row);
+            }
           });
         }
 
@@ -1170,7 +1671,15 @@ function mergeWorkerMain() {
         return;
       }
 
-      const extra = await out.finish();
+      const summary = withSummary ? buildSummary(agg, {
+        generated: new Date().toLocaleString(),
+        reports: sources.length,
+        duplicates: totals.duplicates,
+        excluded: totals.filtered + totals.excluded,
+        sources,
+        perFile,
+      }) : null;
+      const extra = await out.finish(summary);
       const blob = await sink.close(out.mime);
       self.postMessage({
         type: 'done',
@@ -1180,8 +1689,9 @@ function mergeWorkerMain() {
           ...extra,
           format: options.format,
           columns: outCols.length,
-          uniqueHosts: hosts.size,
+          uniqueHosts: agg.hosts.size,
           severity,
+          compliance: agg.comp.slice(),
           perFile,
           ruleHits,
           bytesIn: totalBytes,
