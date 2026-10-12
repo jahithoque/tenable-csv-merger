@@ -985,12 +985,13 @@ function mergeWorkerMain() {
     return s.replace(BAD_XML_CHARS, '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
-  // Cell style indices (see stylesXml): header, title, bold, percent, note,
-  // severity / compliance labels and section headings.
+  // Cell style indices; must match the xfs list in stylesXml.
   const ST = {
     header: 1, title: 2, bold: 3, pct: 4, note: 5,
     critical: 6, high: 7, medium: 8, low: 9, info: 10,
     passed: 11, failed: 12, warning: 13, other: 14, section: 15,
+    td: 16, tdNum: 17, tdBold: 18, tdNumBold: 19, tdPct: 20,
+    kpiValue: 21, kpiLabel: 22, kpiBad: 23, kpiGood: 24, kpiPct: 25, subtitle: 26,
   };
   const SEVERITIES = [
     ['Critical', ST.critical, '91243E'], ['High', ST.high, 'DD4B50'], ['Medium', ST.medium, 'F18C43'],
@@ -1004,26 +1005,51 @@ function mergeWorkerMain() {
   function stylesXml() {
     const font = (flags = '', size = 11, color = '') =>
       `<font>${flags}<sz val="${size}"/>${color ? `<color rgb="FF${color}"/>` : ''}<name val="Calibri"/><family val="2"/></font>`;
-    // 0 normal, 1 bold, 2 title, 3 note, 4 bold white, 5 section heading
-    const fonts = [font(), font('<b/>'), font('<b/>', 16, '1F3864'), font('<i/>', 10, '666666'),
-      font('<b/>', 11, 'FFFFFF'), font('<b/>', 12, '1F3864')];
+    // 0 normal, 1 bold, 2 title, 3 note, 4 bold white, 5 section, 6 KPI value,
+    // 7 KPI label, 8 KPI value (bad), 9 KPI value (good)
+    const fonts = [font(), font('<b/>'), font('<b/>', 18, '1F3864'), font('<i/>', 10, '666666'),
+      font('<b/>', 11, 'FFFFFF'), font('<b/>', 12, '1F3864'), font('<b/>', 20, '1F3864'),
+      font('', 10, '595959'), font('<b/>', 20, 'C23B3B'), font('<b/>', 20, '2E9E5B')];
     const solid = rgb => `<fill><patternFill patternType="solid"><fgColor rgb="FF${rgb}"/><bgColor indexed="64"/></patternFill></fill>`;
     const fills = ['<fill><patternFill patternType="none"/></fill>', '<fill><patternFill patternType="gray125"/></fill>',
       solid('D9E1F2'), solid('91243E'), solid('DD4B50'), solid('F18C43'), solid('F8C851'), solid('67ACE1'),
-      solid('2E9E5B'), solid('C23B3B'), solid('F0A030'), solid('D9D9D9')];
-    const xf = (font, fill, numFmt = 0) =>
-      `<xf numFmtId="${numFmt}" fontId="${font}" fillId="${fill}" borderId="0" xfId="0"` +
-      `${font ? ' applyFont="1"' : ''}${fill ? ' applyFill="1"' : ''}${numFmt ? ' applyNumberFormat="1"' : ''}/>`;
-    // Order must match ST.
+      solid('2E9E5B'), solid('C23B3B'), solid('F0A030'), solid('D9D9D9'), solid('F2F5FA')];
+    const side = (name, rgb) => (rgb ? `<${name} style="thin"><color rgb="FF${rgb}"/></${name}>` : `<${name}/>`);
+    const border = (l, r, t, b, rgb) =>
+      `<border>${side('left', l && rgb)}${side('right', r && rgb)}${side('top', t && rgb)}${side('bottom', b && rgb)}<diagonal/></border>`;
+    // 0 none, 1 table grid, 2 KPI tile top half, 3 KPI tile bottom half
+    const borders = [border(0, 0, 0, 0), border(1, 1, 1, 1, 'BFBFBF'), border(1, 1, 1, 0, 'B4C6E7'), border(1, 1, 0, 1, 'B4C6E7')];
+    const xf = ({ font = 0, fill = 0, num = 0, bd = 0, h = '', v = 'center', wrap = false } = {}) =>
+      `<xf numFmtId="${num}" fontId="${font}" fillId="${fill}" borderId="${bd}" xfId="0"` +
+      `${font ? ' applyFont="1"' : ''}${fill ? ' applyFill="1"' : ''}${num ? ' applyNumberFormat="1"' : ''}` +
+      `${bd ? ' applyBorder="1"' : ''} applyAlignment="1"><alignment${h ? ` horizontal="${h}"` : ''} vertical="${v}"${wrap ? ' wrapText="1"' : ''}/></xf>`;
+    const label = (font, fill) => xf({ font, fill, bd: 1, h: 'center' });
     const xfs = [
-      xf(0, 0), xf(1, 2), xf(2, 0), xf(1, 0), xf(0, 0, 10), xf(3, 0),
-      xf(4, 3), xf(4, 4), xf(4, 5), xf(1, 6), xf(1, 7),   // critical, high, medium, low, info
-      xf(4, 8), xf(4, 9), xf(1, 10), xf(1, 11), xf(5, 0),  // passed, failed, warning, other, section
+      xf({ v: 'bottom' }),                                              // 0 default
+      xf({ font: 1, fill: 2, bd: 1, h: 'center', wrap: true }),         // 1 header
+      xf({ font: 2, h: 'center' }),                                     // 2 title
+      xf({ font: 1 }),                                                  // 3 bold
+      xf({ num: 10, h: 'center' }),                                     // 4 pct
+      xf({ font: 3, h: 'left', wrap: true }),                           // 5 note
+      label(4, 3), label(4, 4), label(4, 5), label(1, 6), label(1, 7),  // 6-10 severity labels
+      label(4, 8), label(4, 9), label(1, 10), label(1, 11),             // 11-14 compliance labels
+      xf({ font: 5, v: 'bottom' }),                                     // 15 section heading
+      xf({ bd: 1, h: 'left', wrap: true }),                             // 16 table text
+      xf({ bd: 1, h: 'center' }),                                       // 17 table number
+      xf({ font: 1, bd: 1, h: 'left' }),                                // 18 table text, bold
+      xf({ font: 1, bd: 1, h: 'center' }),                              // 19 table number, bold
+      xf({ num: 10, bd: 1, h: 'center' }),                              // 20 table percent
+      xf({ font: 6, fill: 12, bd: 2, h: 'center' }),                    // 21 KPI value
+      xf({ font: 7, fill: 12, bd: 3, h: 'center', v: 'top', wrap: true }), // 22 KPI label
+      xf({ font: 8, fill: 12, bd: 2, h: 'center' }),                    // 23 KPI value, bad
+      xf({ font: 9, fill: 12, bd: 2, h: 'center' }),                    // 24 KPI value, good
+      xf({ font: 6, fill: 12, bd: 2, h: 'center', num: 10 }),           // 25 KPI percent
+      xf({ font: 3, h: 'center' }),                                     // 26 subtitle
     ];
     return XML_DECL + `<styleSheet xmlns="${NS_MAIN}">` +
       `<fonts count="${fonts.length}">${fonts.join('')}</fonts>` +
       `<fills count="${fills.length}">${fills.join('')}</fills>` +
-      '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>' +
+      `<borders count="${borders.length}">${borders.join('')}</borders>` +
       '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
       `<cellXfs count="${xfs.length}">${xfs.join('')}</cellXfs>` +
       '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>';
@@ -1148,10 +1174,11 @@ function mergeWorkerMain() {
 
     sheetName(i) { return findingsSheetName(i); }
 
-    sheetHead({ widths, freeze, selected }) {
+    sheetHead({ widths, freeze, selected, gridlines = true, print = false }) {
       const cols = widths.map((w, j) => `<col min="${j + 1}" max="${j + 1}" width="${w}" customWidth="1"/>`).join('');
       return XML_DECL + `<worksheet xmlns="${NS_MAIN}" xmlns:r="${NS_REL}">` +
-        `<sheetViews><sheetView workbookViewId="0"${selected ? ' tabSelected="1"' : ''}>` +
+        (print ? '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>' : '') +
+        `<sheetViews><sheetView workbookViewId="0"${gridlines ? '' : ' showGridLines="0"'}${selected ? ' tabSelected="1"' : ''}>` +
         (freeze
           ? '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/>'
           : '<selection activeCell="A1" sqref="A1"/>') +
@@ -1193,17 +1220,22 @@ function mergeWorkerMain() {
     // Cells are strings, numbers, null, or { v, s } with a style index.
     async writeSpecSheet(spec, fileIndex, selected) {
       const stream = this.zip.openStream(`xl/worksheets/sheet${fileIndex}.xml`);
-      let xml = this.sheetHead({ widths: spec.widths, freeze: spec.freeze, selected });
+      let xml = this.sheetHead({ widths: spec.widths, freeze: spec.freeze, selected, gridlines: spec.gridlines !== false, print: !!spec.print });
       for (let r = 0; r < spec.rows.length; r++) {
         const cells = spec.rows[r];
-        if (!cells || !cells.length) continue;
-        xml += `<row r="${r + 1}">`;
+        const ht = spec.heights && spec.heights[r];
+        if ((!cells || !cells.length) && !ht) continue;
+        xml += `<row r="${r + 1}"${ht ? ` ht="${ht}" customHeight="1"` : ''}>`;
+        if (!cells) { xml += '</row>'; continue; }
         for (let c = 0; c < cells.length; c++) {
           let cell = cells[c];
           let s = 0;
           if (cell !== null && typeof cell === 'object') { s = cell.s || 0; cell = cell.v; }
-          if (cell === null || cell === undefined || cell === '') continue;
           const ref = colLetter(c) + (r + 1);
+          if (cell === null || cell === undefined || cell === '') {
+            if (s) xml += `<c r="${ref}" s="${s}"/>`; // keeps borders/fills across merged cells
+            continue;
+          }
           if (typeof cell === 'number') {
             xml += `<c r="${ref}"${s ? ` s="${s}"` : ''}><v>${Number.isFinite(cell) ? cell : 0}</v></c>`;
           } else {
@@ -1217,6 +1249,15 @@ function mergeWorkerMain() {
       }
       xml += '</sheetData>';
       if (spec.filter) xml += `<autoFilter ref="${spec.filter}"/>`;
+      if (spec.merges && spec.merges.length) {
+        xml += `<mergeCells count="${spec.merges.length}">${spec.merges.map(m => `<mergeCell ref="${m}"/>`).join('')}</mergeCells>`;
+      }
+      if (spec.print) {
+        // Print centred on A4 portrait, one page wide.
+        xml += '<printOptions horizontalCentered="1"/>' +
+          '<pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.3" footer="0.3"/>' +
+          '<pageSetup paperSize="9" orientation="portrait" fitToWidth="1" fitToHeight="0"/>';
+      }
       if (spec.charts && spec.charts.length) xml += '<drawing r:id="rId1"/>';
       await stream.write(xml + '</worksheet>');
       await stream.close();
@@ -1399,124 +1440,211 @@ function mergeWorkerMain() {
     const checkList = [...agg.checks].sort((x, y) =>
       y[1].comp[1] - x[1].comp[1] || y[1].comp[2] - x[1].comp[2] || collator.compare(x[0], y[0]));
 
-    // --- Dashboard: tables in columns A–G, charts from column I.
-    const rows = [];
-    const charts = [];
-    const add = (...cells) => rows.push(cells);
-    const blank = () => rows.push([]);
-    add({ v: 'Tenable Report — Merged Summary', s: ST.title });
-    add({ v: `Generated ${meta.generated} from ${meta.reports} report${meta.reports === 1 ? '' : 's'}`, s: ST.note });
-    blank();
-    add({ v: 'Overview', s: ST.section });
-    add({ v: 'Metric', s: ST.header }, { v: 'Value', s: ST.header });
-    add('Reports merged', meta.reports);
-    add(T.Many, agg.hosts.size);
-    if (hasVulns) add('Vulnerability findings', agg.vulnTotal);
-    if (hasVulns) add('Unique vulnerabilities (plugins)', agg.plugins.size);
-    if (hasComp) add('Compliance checks evaluated', agg.compTotal);
-    if (hasComp) add({ v: 'Compliance score', s: ST.bold }, { v: compScore, s: ST.pct });
-    if (meta.authPlugins.length) {
-      add({ v: `${T.Many} with failed authentication`, s: ST.bold }, { v: agg.authTotal, s: agg.authTotal ? ST.failed : ST.passed });
-    }
-    add('Duplicates removed', meta.duplicates);
-    add('Rows excluded (informational / rules)', meta.excluded);
-    if (IDENTITY_NOTES[meta.identity]) add({ v: IDENTITY_NOTES[meta.identity], s: ST.note });
-    if (meta.findingsSheets > 1) {
-      add({ v: 'Findings sheets', s: ST.bold }, { v: meta.findingsSheets, s: ST.bold });
-      add({ v: `Findings continue across ${meta.findingsSheets} sheets (Findings to ${findingsSheetName(meta.findingsSheets - 1)}). Excel allows at most 1,048,576 rows per sheet; the Sources sheet shows which sheet holds each report.`, s: ST.note });
-    }
-    blank();
-
     const authList = agg.auth.slice().sort((x, y) =>
       collator.compare(x.host, y.host) || collator.compare(x.ip, y.ip) || collator.compare(x.source, y.source) || collator.compare(x.port, y.port));
-    if (meta.authPlugins.length) {
-      add({ v: `Authentication failures (plugin ${meta.authPlugins.join(', ')})`, s: ST.section });
-      if (!authList.length) {
-        add({ v: 'No authentication failures found — credentials worked on every host that reported.', s: ST.passed });
-      } else {
-        add({ v: `${agg.authTotal} ${agg.authTotal === 1 ? T.one : T.many} could not be scanned with the provided credentials, so their results may be incomplete.`, s: ST.note });
-        add(...['Host', 'IP Address', ...(showReport ? ['Report'] : []), 'Auth protocol', 'Port', 'User', 'Error'].map(v => ({ v, s: ST.header })));
-        const AUTH_ON_DASHBOARD = 25;
-        for (const a of authList.slice(0, AUTH_ON_DASHBOARD)) {
-          const errText = a.parsed.error || (a.output ? a.output.replace(/\s+/g, ' ').slice(0, 200) : '');
-          add({ v: a.host, s: ST.failed }, a.ip, ...(showReport ? [a.source] : []), a.parsed.protocol || a.protocol, asNumber(a.parsed.port || a.port), a.parsed.user, errText);
+
+    // --- Dashboard: an 8-column grid (B–I) between narrow margins, gridlines
+    // off. Every row's spans add up to 8 so tables line up and stay centred;
+    // charts get their own reserved rows so they never cover a table.
+    const GRID = 8;
+    const COL_WIDTH = 16;
+    const rows = [];
+    const merges = [];
+    const heights = {};
+    const blank = ht => { rows.push([]); if (ht) heights[rows.length - 1] = ht; };
+    const WRAPPED = new Set([ST.td, ST.tdBold, ST.header, ST.note]);
+    // items: [{ v, s, span }]; returns the 1-based row number.
+    const line = (items, ht) => {
+      const r = rows.length + 1;
+      const cells = [null]; // column A is the left margin
+      let lines = 1;
+      for (const it of items) {
+        const span = it.span || 1;
+        const start = cells.length;
+        cells.push({ v: it.v, s: it.s || 0 });
+        for (let k = 1; k < span; k++) cells.push({ v: '', s: it.s || 0 });
+        if (span > 1 && (it.s || (it.v !== '' && it.v !== null && it.v !== undefined))) {
+          merges.push(`${colLetter(start)}${r}:${colLetter(start + span - 1)}${r}`);
         }
-        if (authList.length > AUTH_ON_DASHBOARD) {
-          add({ v: `… and ${authList.length - AUTH_ON_DASHBOARD} more. See the "Auth Failures" sheet.`, s: ST.note });
+        // Merged cells don't auto-fit, so size wrapped text explicitly.
+        if (typeof it.v === 'string' && WRAPPED.has(it.s)) {
+          // Column width is measured in digit widths; text averages ~0.8 of that.
+          lines = Math.max(lines, Math.ceil(it.v.length / (span * COL_WIDTH * 1.25 - 2)));
         }
       }
-      blank();
+      rows.push(cells);
+      const auto = lines > 1 ? Math.min(lines, 8) * 15 + 3 : 0;
+      if (ht || auto) heights[r - 1] = Math.max(ht || 0, auto);
+      return r;
+    };
+    const full = (v, s, ht) => line([{ v, s, span: GRID }], ht);
+    const head = labels => line(labels.map(([v, span]) => ({ v, s: ST.header, span })), 20);
+
+    full('Tenable Report — Merged Summary', ST.title, 34);
+    full(`Generated ${meta.generated} from ${meta.reports} report${meta.reports === 1 ? '' : 's'}`, ST.subtitle, 18);
+    blank(10);
+
+    // KPI tiles: 4 per row (2 columns each); a short last row is centred.
+    const kpis = [['Reports merged', meta.reports, ST.kpiValue], [T.Many, agg.hosts.size, ST.kpiValue]];
+    if (hasComp) {
+      kpis.push(['Compliance score', compScore, ST.kpiPct],
+        ['Failed checks', agg.comp[1], agg.comp[1] ? ST.kpiBad : ST.kpiGood],
+        ['Warning / Manual check', agg.comp[2], ST.kpiValue]);
+    }
+    if (hasVulns) {
+      const ch = agg.sev[0] + agg.sev[1];
+      kpis.push(['Vulnerability findings', agg.vulnTotal, ST.kpiValue], ['Critical + High findings', ch, ch ? ST.kpiBad : ST.kpiGood]);
+    }
+    if (meta.authPlugins.length) {
+      kpis.push([`${T.Many} with failed authentication`, agg.authTotal, agg.authTotal ? ST.kpiBad : ST.kpiGood]);
+    }
+    kpis.push(['Duplicates removed', meta.duplicates, ST.kpiValue], ['Rows excluded (info / rules)', meta.excluded, ST.kpiValue]);
+    for (let i = 0; i < kpis.length; i += 4) {
+      const group = kpis.slice(i, i + 4);
+      const free = GRID - group.length * 2;
+      const pad = (n, items) => (n ? [{ v: '', span: n }, ...items] : items);
+      const withPads = items => {
+        const left = Math.floor(free / 2);
+        const out = pad(left, items);
+        return free - left ? [...out, { v: '', span: free - left }] : out;
+      };
+      line(withPads(group.map(([, v, s]) => ({ v, s, span: 2 }))), 36);
+      line(withPads(group.map(([label]) => ({ v: label, s: ST.kpiLabel, span: 2 }))), 30);
+      blank(8);
     }
 
-    let chartRow = 3; // zero-based anchor row for the next chart
+    // Charts: side by side across the grid, or one centred chart.
+    const chartTypes = [hasVulns && 'bar', hasComp && 'doughnut'].filter(Boolean);
+    const CHART_ROWS = 20;
+    let chartTop = -1;
+    if (chartTypes.length) {
+      blank(6);
+      chartTop = rows.length; // zero-based row index where charts start
+      for (let i = 0; i < CHART_ROWS; i++) blank();
+      blank(10);
+    }
+    const anchors = chartTypes.length === 2
+      ? { bar: [1, 5], doughnut: [5, 9] }
+      : { [chartTypes[0]]: [2, 8] }; // columns C–H, centred
+    const charts = [];
+    const addChart = (type, chart) => {
+      const [c0, c1] = anchors[type];
+      charts.push({ from: [c0, chartTop], to: [c1, chartTop + CHART_ROWS], chart: { type, ...chart } });
+    };
+
+    if (IDENTITY_NOTES[meta.identity]) full(IDENTITY_NOTES[meta.identity], ST.note);
+    if (meta.findingsSheets > 1) {
+      full(`Findings continue across ${meta.findingsSheets} sheets (Findings to ${findingsSheetName(meta.findingsSheets - 1)}). Excel allows at most 1,048,576 rows per sheet; the Sources sheet shows which sheet holds each report.`, ST.note);
+    }
+    blank(10);
+
     if (hasVulns) {
-      add({ v: 'Vulnerabilities by severity', s: ST.section });
-      add({ v: 'Severity', s: ST.header }, { v: 'Findings', s: ST.header }, { v: '% of findings', s: ST.header }, { v: `${T.Many} affected`, s: ST.header });
+      full('Vulnerabilities by severity', ST.section, 24);
+      head([['Severity', 2], ['Findings', 2], ['% of findings', 2], [`${T.Many} affected`, 2]]);
       const first = rows.length + 1;
       for (const sev of sevRows) {
         const i = SEVERITIES.indexOf(sev);
-        add({ v: sev[0], s: sev[1] }, agg.sev[i], { v: ratio(agg.sev[i], agg.vulnTotal), s: ST.pct }, agg.sevHosts[i].size);
+        line([{ v: sev[0], s: sev[1], span: 2 }, { v: agg.sev[i], s: ST.tdNum, span: 2 },
+          { v: ratio(agg.sev[i], agg.vulnTotal), s: ST.tdPct, span: 2 }, { v: agg.sevHosts[i].size, s: ST.tdNum, span: 2 }]);
       }
       const last = rows.length;
-      add({ v: 'Total', s: ST.bold }, { v: agg.vulnTotal, s: ST.bold }, { v: 1, s: ST.pct });
-      blank();
-      charts.push({
-        from: [8, chartRow], to: [16, chartRow + 17],
-        chart: {
-          type: 'bar', title: 'Vulnerability findings by severity', catRange: `$A$${first}:$A$${last}`, valRange: `$B$${first}:$B$${last}`,
-          cats: sevRows.map(s => s[0]), vals: sevRows.map(s => agg.sev[SEVERITIES.indexOf(s)]), colors: sevRows.map(s => s[2]),
-        },
+      line([{ v: 'Total', s: ST.tdBold, span: 2 }, { v: agg.vulnTotal, s: ST.tdNumBold, span: 2 },
+        { v: 1, s: ST.tdPct, span: 2 }, { v: '', s: ST.tdNum, span: 2 }]);
+      blank(10);
+      addChart('bar', {
+        title: 'Vulnerability findings by severity', catRange: `$B$${first}:$B$${last}`, valRange: `$D$${first}:$D$${last}`,
+        cats: sevRows.map(s => s[0]), vals: sevRows.map(s => agg.sev[SEVERITIES.indexOf(s)]), colors: sevRows.map(s => s[2]),
       });
-      chartRow += 19;
     }
 
     if (hasComp) {
-      add({ v: 'Compliance results', s: ST.section });
-      add({ v: 'Result', s: ST.header }, { v: 'Checks', s: ST.header }, { v: '% of checks', s: ST.header });
+      full('Compliance results', ST.section, 24);
+      head([['Result', 4], ['Checks', 2], ['% of checks', 2]]);
       const first = rows.length + 1;
-      COMPLIANCE_RESULTS.forEach(([label, style], i) => add({ v: label, s: style }, agg.comp[i], { v: ratio(agg.comp[i], agg.compTotal), s: ST.pct }));
+      COMPLIANCE_RESULTS.forEach(([label, style], i) => line([{ v: label, s: style, span: 4 },
+        { v: agg.comp[i], s: ST.tdNum, span: 2 }, { v: ratio(agg.comp[i], agg.compTotal), s: ST.tdPct, span: 2 }]));
       const last = rows.length;
-      add({ v: 'Total', s: ST.bold }, { v: agg.compTotal, s: ST.bold }, { v: 1, s: ST.pct });
-      add({ v: 'Compliance score', s: ST.bold }, { v: compScore, s: ST.pct });
-      add({ v: 'Score = Passed ÷ (Passed + Failed + Warning / Manual check)', s: ST.note });
-      blank();
-      charts.push({
-        from: [8, chartRow], to: [16, chartRow + 17],
-        chart: {
-          type: 'doughnut', title: 'Compliance results', catRange: `$A$${first}:$A$${last}`, valRange: `$B$${first}:$B$${last}`,
-          cats: COMPLIANCE_RESULTS.map(r => r[0]), vals: agg.comp.slice(), colors: COMPLIANCE_RESULTS.map(r => r[2]),
-        },
+      line([{ v: 'Total', s: ST.tdBold, span: 4 }, { v: agg.compTotal, s: ST.tdNumBold, span: 2 }, { v: 1, s: ST.tdPct, span: 2 }]);
+      line([{ v: 'Compliance score', s: ST.tdBold, span: 4 }, { v: compScore, s: ST.tdPct, span: 4 }]);
+      full('Score = Passed ÷ (Passed + Failed + Warning / Manual check)', ST.note);
+      blank(10);
+      addChart('doughnut', {
+        title: 'Compliance results', catRange: `$B$${first}:$B$${last}`, valRange: `$F$${first}:$F$${last}`,
+        cats: COMPLIANCE_RESULTS.map(r => r[0]), vals: agg.comp.slice(), colors: COMPLIANCE_RESULTS.map(r => r[2]),
       });
     }
 
-    if (hostList.length) {
-      add({ v: `Top 10 ${T.many} by risk`, s: ST.section });
-      const head = [{ v: byHost ? 'Host' : 'Target', s: ST.header }];
-      if (hasVulns) head.push(...['Critical', 'High', 'Medium', 'Low'].map(v => ({ v, s: ST.header })));
-      if (hasComp) head.push({ v: 'Failed checks', s: ST.header }, { v: 'Pass rate', s: ST.header });
-      add(...head);
-      for (const [, h] of hostList.slice(0, 10)) {
-        const cells = [label(h)];
-        if (hasVulns) cells.push(...h.sev.slice(0, 4));
-        if (hasComp) cells.push(h.comp[1], h.comp.some(Boolean) ? { v: passRate(h.comp), s: ST.pct } : null);
-        add(...cells);
+    if (meta.authPlugins.length) {
+      full(`Authentication failures (plugin ${meta.authPlugins.join(', ')})`, ST.section, 24);
+      if (!authList.length) {
+        line([{ v: 'No authentication failures found. Credentials worked on every target that reported.', s: ST.passed, span: GRID }], 20);
+      } else {
+        full(`${agg.authTotal} ${agg.authTotal === 1 ? T.one : T.many} could not be scanned with the provided credentials, so their results may be incomplete.`, ST.note);
+        const cols = showReport
+          ? [['Host', 1], ['IP Address', 1], ['Report', 2], ['Protocol / Port', 1], ['User', 1], ['Error', 2]]
+          : [['Host', 2], ['IP Address', 1], ['Protocol / Port', 1], ['User', 1], ['Error', 3]];
+        head(cols);
+        const AUTH_ON_DASHBOARD = 25;
+        for (const a of authList.slice(0, AUTH_ON_DASHBOARD)) {
+          const errText = a.parsed.error || (a.output ? a.output.replace(/\s+/g, ' ').slice(0, 200) : '');
+          const vals = {
+            'Host': { v: a.host, s: ST.tdBold }, 'IP Address': { v: a.ip, s: ST.tdNum }, 'Report': { v: a.source, s: ST.td },
+            'Protocol / Port': { v: [a.parsed.protocol || a.protocol, a.parsed.port || a.port].filter(Boolean).join(' / '), s: ST.tdNum },
+            'User': { v: a.parsed.user, s: ST.tdNum }, 'Error': { v: errText, s: ST.td },
+          };
+          line(cols.map(([name, span]) => ({ ...vals[name], span })));
+        }
+        if (authList.length > AUTH_ON_DASHBOARD) {
+          full(`… and ${authList.length - AUTH_ON_DASHBOARD} more. See the "Auth Failures" sheet.`, ST.note);
+        }
       }
-      blank();
+      blank(10);
+    }
+
+    if (hostList.length) {
+      full(`Top 10 ${T.many} by risk`, ST.section, 24);
+      const name = byHost ? 'Host' : 'Target';
+      if (hasVulns && hasComp) {
+        head([[name, 2], ['Critical', 1], ['High', 1], ['Medium', 1], ['Low', 1], ['Failed checks', 1], ['Pass rate', 1]]);
+      } else if (hasVulns) {
+        head([[name, 4], ['Critical', 1], ['High', 1], ['Medium', 1], ['Low', 1]]);
+      } else {
+        head([[name, 4], ['Failed', 1], ['Warning / Manual', 1], ['Passed', 1], ['Pass rate', 1]]);
+      }
+      for (const [, h] of hostList.slice(0, 10)) {
+        const rate = h.comp.some(Boolean) ? { v: passRate(h.comp), s: ST.tdPct } : { v: '', s: ST.tdNum };
+        const num = v => ({ v, s: ST.tdNum });
+        if (hasVulns && hasComp) {
+          line([{ v: label(h), s: ST.td, span: 2 }, ...h.sev.slice(0, 4).map(num), num(h.comp[1]), rate]);
+        } else if (hasVulns) {
+          line([{ v: label(h), s: ST.td, span: 4 }, ...h.sev.slice(0, 4).map(num)]);
+        } else {
+          line([{ v: label(h), s: ST.td, span: 4 }, num(h.comp[1]), num(h.comp[2]), num(h.comp[0]), rate]);
+        }
+      }
+      blank(10);
     }
     if (hasVulns && pluginList.length) {
-      add({ v: 'Top 10 vulnerabilities', s: ST.section });
-      add({ v: 'Name', s: ST.header }, { v: 'Plugin ID', s: ST.header }, { v: 'Severity', s: ST.header }, { v: T.Many, s: ST.header });
+      full('Top 10 vulnerabilities', ST.section, 24);
+      head([['Name', 5], ['Plugin ID', 1], ['Severity', 1], [T.Many, 1]]);
       for (const [id, p] of pluginList.slice(0, 10)) {
-        add(p.name || id, asNumber(id), { v: SEVERITIES[p.sev][0], s: SEVERITIES[p.sev][1] }, p.hosts);
+        line([{ v: p.name || id, s: ST.td, span: 5 }, { v: asNumber(id), s: ST.tdNum },
+          { v: SEVERITIES[p.sev][0], s: SEVERITIES[p.sev][1] }, { v: p.hosts, s: ST.tdNum }]);
       }
-      blank();
+      blank(10);
     }
     if (hasComp && checkList.length) {
-      add({ v: 'Top 10 failed compliance checks', s: ST.section });
-      add({ v: 'Check', s: ST.header }, { v: 'Failed', s: ST.header }, { v: 'Warning / Manual', s: ST.header }, { v: 'Passed', s: ST.header }, { v: 'Pass rate', s: ST.header });
-      for (const [check, c] of checkList.slice(0, 10)) add(check, c.comp[1], c.comp[2], c.comp[0], { v: passRate(c.comp), s: ST.pct });
+      full('Top 10 failed compliance checks', ST.section, 24);
+      head([['Check', 4], ['Failed', 1], ['Warning / Manual', 1], ['Passed', 1], ['Pass rate', 1]]);
+      for (const [check, c] of checkList.slice(0, 10)) {
+        line([{ v: check, s: ST.td, span: 4 }, { v: c.comp[1], s: ST.tdNum }, { v: c.comp[2], s: ST.tdNum },
+          { v: c.comp[0], s: ST.tdNum }, { v: passRate(c.comp), s: ST.tdPct }]);
+      }
     }
-    sheets.push({ name: 'Dashboard', widths: [58, 14, 14, 14, 14, 14, 14, 3], rows, freeze: false, charts });
+    sheets.push({
+      name: 'Dashboard', widths: [2, ...Array(GRID).fill(COL_WIDTH), 2], rows, merges, heights,
+      freeze: false, gridlines: false, print: true, charts,
+    });
 
     // --- Hosts
     if (hostList.length) {
