@@ -201,6 +201,8 @@
     .format label + label span { border-left: 1px solid var(--border); }
     .format input:checked + span { background: var(--accent); color: var(--accent-ink); }
     .format input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: -2px; }
+    fieldset.report-type { margin-bottom: 16px; }
+    .mode-help { margin: 6px 0 0; color: var(--muted); font-size: 12.5px; }
     .dz-sub code { font-family: var(--mono); font-size: 12.5px; }
 
     /* Columns */
@@ -308,6 +310,16 @@
 
     <section class="card" id="options-card" hidden>
       <div class="card-head"><h2>Merge options</h2></div>
+      <fieldset class="report-type">
+        <legend>Report type</legend>
+        <div class="format" role="radiogroup" aria-label="Report type">
+          <label><input type="radio" name="mode" value="auto" checked><span>Auto-detect</span></label>
+          <label><input type="radio" name="mode" value="vulnerability"><span>Vulnerability scan</span></label>
+          <label><input type="radio" name="mode" value="compliance"><span>Compliance audit</span></label>
+        </div>
+        <p class="mode-help" id="mode-help"></p>
+      </fieldset>
+
       <div class="options-grid">
         <fieldset>
           <legend>Duplicates</legend>

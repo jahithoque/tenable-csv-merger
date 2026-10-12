@@ -15,6 +15,16 @@ Works offline and straight from disk (`file://`).
 - **`.zip` archives** — e.g. the bulk downloads from Tenable. Every `.nessus` and `.csv` inside (including subfolders) is listed as its own report; nothing is extracted to disk.
 - **`.nessus` files** (NessusClientData_v2 XML) — each finding becomes a row using the same column names as Tenable's CSV export (one row per CVE), plus host details such as IP address, FQDN, NetBIOS name, OS and scan name, and compliance fields (check name, result, actual / policy value, reference, audit file) for compliance scans.
 - **Compliance results in CSV exports** — the check name and PASSED / FAILED / WARNING result are parsed from the Description into *Compliance Check* / *Compliance Result* columns.
+
+### Report type
+
+| Setting | Behaviour |
+| --- | --- |
+| **Auto-detect** (default) | Compliance results are recognised from `.nessus` compliance fields or a `[PASSED]` / `[FAILED]` marker in the Description; everything else is a vulnerability. |
+| **Vulnerability scan** | Every row is a vulnerability finding, graded by Risk. |
+| **Compliance audit** | Every row is a compliance check. When a report has no explicit result (common in Tenable exports), Risk is used: **None = Passed, High = Failed, Medium = Warning / Manual check** (Critical = Failed, Low = Warning). The check name comes from the Name column. |
+
+The choice is remembered in your browser.
 - **`.csv` exports** from Nessus / Tenable.
 
 Inputs can be mixed freely; the output contains the union of all columns.

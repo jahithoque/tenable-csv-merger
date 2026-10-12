@@ -21,7 +21,7 @@
     optionsCard: $('options-card'), optSource: $('opt-source'), optInfo: $('opt-info'), optBom: $('opt-bom'), optBomWrap: $('opt-bom-wrap'),
     optDisk: $('opt-disk'), optDiskWrap: $('opt-disk-wrap'), optName: $('opt-name'),
     colCount: $('col-count'), colNote: $('col-note'), colChips: $('col-chips'), colSearch: $('col-search'),
-    optSummary: $('opt-summary'), optSummaryWrap: $('opt-summary-wrap'),
+    optSummary: $('opt-summary'), optSummaryWrap: $('opt-summary-wrap'), modeHelp: $('mode-help'),
     mergeBtn: $('merge-btn'), mergeHint: $('merge-hint'),
     progressCard: $('progress-card'), progressTitle: $('progress-title'), progressBar: $('progress-bar'),
     progressFill: $('progress-fill'), progressPct: $('progress-pct'), progressDetail: $('progress-detail'),
@@ -334,6 +334,15 @@
         else map.set(key, { name: h, key, count: 1 });
       }
     }
+    // In compliance-audit mode every report gets these, derived from Risk / Name if missing.
+    if (reportMode() === 'compliance' && map.size) {
+      const ready = state.entries.filter(x => x.status === 'ready').length;
+      for (const name of ['Compliance Check', 'Compliance Result']) {
+        const col = map.get(name.toLowerCase());
+        if (col) col.count = ready;
+        else map.set(name.toLowerCase(), { name, key: name.toLowerCase(), count: ready });
+      }
+    }
     return [...map.values()];
   }
 
@@ -349,7 +358,9 @@
   };
   const COLUMNS_STORAGE_KEY = 'tenable-merger.columns.v1';
 
-  const hasCompliance = () => state.entries.some(x => x.status === 'ready' && x.compliance);
+  const reportMode = () => document.querySelector('input[name="mode"]:checked').value;
+  const hasCompliance = () => reportMode() === 'compliance' ||
+    (reportMode() === 'auto' && state.entries.some(x => x.status === 'ready' && x.compliance));
   function isIncluded(col) {
     if (state.colChoice.has(col.key)) return state.colChoice.get(col.key);
     return !COMPLIANCE_COLS.includes(col.key) || hasCompliance();
@@ -729,6 +740,7 @@
         excludeInfo: el.optInfo.checked,
         format: outputFormat(),
         summary: el.optSummary.checked,
+        mode: reportMode(),
         bom: el.optBom.checked,
         rules: activeRules().map(r => ({ column: r.column, op: r.op, values: ruleValues(r) })),
       },
@@ -864,7 +876,7 @@
   function renderCompliance(c) {
     addBar('Compliance results', [
       ['Passed', c[0], 'var(--ok)'], ['Failed', c[1], 'var(--danger)'],
-      ['Warning', c[2], 'var(--sev-medium)'], ['Error / other', c[3], 'var(--muted)'],
+      ['Warning / Manual check', c[2], 'var(--sev-medium)'], ['Error / other', c[3], 'var(--muted)'],
     ].filter(([, n]) => n));
   }
 
@@ -925,6 +937,27 @@
   window.addEventListener('beforeunload', e => {
     if (state.merging) { e.preventDefault(); e.returnValue = ''; }
   });
+
+  // Report type: how rows are classified as vulnerabilities or compliance results.
+  const MODE_STORAGE_KEY = 'tenable-merger.mode.v1';
+  const MODE_HELP = {
+    auto: 'Compliance results are recognised from .nessus compliance fields or a "[PASSED]" / "[FAILED]" marker in the Description. Everything else is a vulnerability.',
+    vulnerability: 'Every row is treated as a vulnerability finding, graded by Risk.',
+    compliance: 'Every row is a compliance check. If a report has no explicit result, Risk is used: None = Passed, High = Failed, Medium = Warning / Manual check. The check name comes from the Name column.',
+  };
+  function syncMode() {
+    el.modeHelp.textContent = MODE_HELP[reportMode()];
+    try { localStorage.setItem(MODE_STORAGE_KEY, reportMode()); } catch (_) { /* unavailable */ }
+    clearResult();
+    refresh();
+  }
+  try {
+    const saved = localStorage.getItem(MODE_STORAGE_KEY);
+    const radio = saved && document.querySelector(`input[name="mode"][value="${CSS.escape(saved)}"]`);
+    if (radio) radio.checked = true;
+  } catch (_) { /* unavailable */ }
+  for (const r of document.querySelectorAll('input[name="mode"]')) r.addEventListener('change', syncMode);
+  el.modeHelp.textContent = MODE_HELP[reportMode()];
 
   loadColumns();
   loadRules();

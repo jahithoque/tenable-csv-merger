@@ -211,6 +211,16 @@ function mergeWorkerMain() {
     return 3;
   }
 
+  // Tenable compliance exports often carry the result only in Risk:
+  // None = passed, High = failed, Medium = warning / manual check.
+  function riskToResult(risk) {
+    const r = risk.trim().toLowerCase();
+    if (INFO_LEVELS.has(r) || r === 'passed') return 'PASSED';
+    if (r === 'high' || r === 'critical') return 'FAILED';
+    if (r === 'medium' || r === 'low') return 'WARNING';
+    return '';
+  }
+
   // Buckets: 0 critical, 1 high, 2 medium, 3 low, 4 info, 5 other.
   function severityBucket(risk) {
     const r = risk.trim().toLowerCase();
@@ -955,7 +965,7 @@ function mergeWorkerMain() {
   ];
   const COMPLIANCE_RESULTS = [
     ['Passed', ST.passed, '2E9E5B'], ['Failed', ST.failed, 'C23B3B'],
-    ['Warning', ST.warning, 'F0A030'], ['Error / other', ST.other, 'A6A6A6'],
+    ['Warning / Manual check', ST.warning, 'F0A030'], ['Error / other', ST.other, 'A6A6A6'],
   ];
 
   function stylesXml() {
@@ -1374,7 +1384,7 @@ function mergeWorkerMain() {
       const last = rows.length;
       add({ v: 'Total', s: ST.bold }, { v: agg.compTotal, s: ST.bold }, { v: 1, s: ST.pct });
       add({ v: 'Compliance score', s: ST.bold }, { v: compScore, s: ST.pct });
-      add({ v: 'Score = Passed ÷ (Passed + Failed + Warning)', s: ST.note });
+      add({ v: 'Score = Passed ÷ (Passed + Failed + Warning / Manual check)', s: ST.note });
       blank();
       charts.push({
         from: [8, chartRow], to: [16, chartRow + 17],
@@ -1409,7 +1419,7 @@ function mergeWorkerMain() {
     }
     if (hasComp && checkList.length) {
       add({ v: 'Top 10 failed compliance checks', s: ST.section });
-      add({ v: 'Check', s: ST.header }, { v: 'Failed', s: ST.header }, { v: 'Warning', s: ST.header }, { v: 'Passed', s: ST.header }, { v: 'Pass rate', s: ST.header });
+      add({ v: 'Check', s: ST.header }, { v: 'Failed', s: ST.header }, { v: 'Warning / Manual', s: ST.header }, { v: 'Passed', s: ST.header }, { v: 'Pass rate', s: ST.header });
       for (const [check, c] of checkList.slice(0, 10)) add(check, c.comp[1], c.comp[2], c.comp[0], { v: passRate(c.comp), s: ST.pct });
     }
     sheets.push({ name: 'Dashboard', widths: [58, 14, 14, 14, 14, 14, 14, 3], rows, freeze: false, charts });
@@ -1425,7 +1435,7 @@ function mergeWorkerMain() {
       if (anyFqdn) { head.push('FQDN'); widths.push(30); }
       if (anyOs) { head.push('OS'); widths.push(34); }
       if (hasVulns) { head.push('Critical', 'High', 'Medium', 'Low', 'Info', 'Total'); widths.push(10, 10, 10, 10, 10, 10); }
-      if (hasComp) { head.push('Passed', 'Failed', 'Warning', 'Error / other', 'Pass rate'); widths.push(10, 10, 10, 13, 11); }
+      if (hasComp) { head.push('Passed', 'Failed', 'Warning / Manual', 'Error / other', 'Pass rate'); widths.push(10, 10, 17, 13, 11); }
       const hostRows = [head.map(v => ({ v, s: ST.header }))];
       for (const [name, h] of hostList.slice(0, XLSX_MAX_ROWS)) {
         const cells = [name];
@@ -1458,13 +1468,13 @@ function mergeWorkerMain() {
     // --- Compliance
     if (hasComp) {
       const anyAudit = checkList.some(([, c]) => c.audit);
-      const head = ['Check', ...(anyAudit ? ['Audit File'] : []), 'Passed', 'Failed', 'Warning', 'Error / other', 'Total', 'Pass rate'];
+      const head = ['Check', ...(anyAudit ? ['Audit File'] : []), 'Passed', 'Failed', 'Warning / Manual', 'Error / other', 'Total', 'Pass rate'];
       const compRows = [head.map(v => ({ v, s: ST.header }))];
       for (const [check, c] of checkList.slice(0, XLSX_MAX_ROWS)) {
         compRows.push([check, ...(anyAudit ? [c.audit] : []), ...c.comp, c.comp.reduce((a, b) => a + b, 0), { v: passRate(c.comp), s: ST.pct }]);
       }
       sheets.push({
-        name: 'Compliance', widths: [80, ...(anyAudit ? [30] : []), 10, 10, 10, 13, 10, 11], rows: compRows,
+        name: 'Compliance', widths: [80, ...(anyAudit ? [30] : []), 10, 10, 17, 13, 10, 11], rows: compRows,
         freeze: true, filter: `A1:${colLetter(head.length - 1)}${compRows.length}`,
       });
     }
@@ -1505,6 +1515,7 @@ function mergeWorkerMain() {
       throw new Error('This browser cannot create .xlsx files. Use a current Chrome, Edge, Firefox or Safari, or choose CSV output.');
     }
     const withSummary = options.format === 'xlsx' && options.summary !== false;
+    const complianceMode = options.mode === 'compliance';
     const out = options.format === 'xlsx' ? new XlsxOutput(sink, outCols, withSummary) : new CsvOutput(sink, outCols, options.bom);
 
     const totalBytes = sources.reduce((s, src) => s + sourceBytes(src), 0);
@@ -1552,7 +1563,7 @@ function mergeWorkerMain() {
 
           // Compliance results are never "informational": a PASSED check has
           // Risk None, but dropping it would skew the pass rate.
-          const compBucket = fKey.result === -1 ? -1 : complianceBucket(row[fKey.result] || '');
+          const compBucket = fKey.result === -1 || options.mode === 'vulnerability' ? -1 : complianceBucket(row[fKey.result] || '');
 
           if (options.excludeInfo && compBucket === -1 && fKey.risk !== -1) {
             const sev = (row[fKey.risk] || '').trim().toLowerCase();
@@ -1603,33 +1614,42 @@ function mergeWorkerMain() {
           }
         };
 
+        // Fills "Compliance Check" / "Compliance Result" where a source lacks
+        // them: from the Description ("<check>": [RESULT]) when present and,
+        // in compliance-audit mode, from Risk and Name otherwise.
+        const fillCompliance = row => {
+          if (fKey.result === -1) return;
+          const hasResult = row[fKey.result] && row[fKey.result].trim();
+          const hasCheck = fKey.check === -1 || (row[fKey.check] && row[fKey.check].trim());
+          if (hasResult && hasCheck) return;
+          const parsed = parseComplianceDesc(cell(row, 'desc'));
+          if (!hasResult) row[fKey.result] = parsed ? parsed[1] : complianceMode ? riskToResult(cell(row, 'risk')) : '';
+          if (!hasCheck) row[fKey.check] = parsed ? parsed[0] : complianceMode ? cell(row, 'name') : '';
+        };
+
         let parser;
         if (src.kind === 'nessus') {
           setHeaders(NESSUS_COLUMNS);
-          parser = new NessusStreamParser(handleRow);
+          parser = new NessusStreamParser(row => { fillCompliance(row); return handleRow(row); });
         } else {
-          // CSVs holding compliance results without a result column get
-          // "Compliance Check" / "Compliance Result" parsed from Description.
           let rawCols = 0;
-          let descIdx = -1;
+          let derive = false;
           parser = new CsvStreamParser(row => {
             if (map === null) {
               let headers = row.map(normalizeHeader);
               rawCols = headers.length;
-              if (src.derive) {
-                descIdx = findColumn(headers, KEY_ALIASES.desc);
-                headers = headers.concat(DERIVED_COLUMNS);
-              }
+              derive = (src.derive || complianceMode) && findColumn(headers, KEY_ALIASES.result) === -1;
+              if (derive) headers = headers.concat(DERIVED_COLUMNS);
               setHeaders(headers);
-            } else if (src.derive) {
+              return;
+            }
+            if (derive) {
               // Normalise the length first so the derived values land in their columns.
               if (row.length !== rawCols) { stats.malformed++; row.length = rawCols; }
-              const parsed = parseComplianceDesc(row[descIdx] || '') || ['', ''];
-              row.push(parsed[0], parsed[1]);
-              handleRow(row);
-            } else {
-              handleRow(row);
+              row.push('', '');
             }
+            fillCompliance(row);
+            handleRow(row);
           });
         }
 
