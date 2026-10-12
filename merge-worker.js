@@ -992,6 +992,7 @@ function mergeWorkerMain() {
     passed: 11, failed: 12, warning: 13, other: 14, section: 15,
     td: 16, tdNum: 17, tdBold: 18, tdNumBold: 19, tdPct: 20,
     kpiValue: 21, kpiLabel: 22, kpiBad: 23, kpiGood: 24, kpiPct: 25, subtitle: 26,
+    cellText: 27, cellNum: 28,
   };
   const SEVERITIES = [
     ['Critical', ST.critical, '91243E'], ['High', ST.high, 'DD4B50'], ['Medium', ST.medium, 'F18C43'],
@@ -1003,13 +1004,16 @@ function mergeWorkerMain() {
   ];
 
   function stylesXml() {
-    const font = (flags = '', size = 11, color = '') =>
-      `<font>${flags}<sz val="${size}"/>${color ? `<color rgb="FF${color}"/>` : ''}<name val="Calibri"/><family val="2"/></font>`;
+    // Arial rather than Calibri: Excel for Mac can draw Calibri with almost
+    // zero-width spaces ("% of checks" reads "%ofchecks"), and Arial is
+    // installed on every Mac and Windows machine.
+    const font = (flags = '', size = 10, color = '') =>
+      `<font>${flags}<sz val="${size}"/>${color ? `<color rgb="FF${color}"/>` : ''}<name val="Arial"/><family val="2"/></font>`;
     // 0 normal, 1 bold, 2 title, 3 note, 4 bold white, 5 section, 6 KPI value,
     // 7 KPI label, 8 KPI value (bad), 9 KPI value (good)
-    const fonts = [font(), font('<b/>'), font('<b/>', 18, '1F3864'), font('<i/>', 10, '666666'),
-      font('<b/>', 11, 'FFFFFF'), font('<b/>', 12, '1F3864'), font('<b/>', 20, '1F3864'),
-      font('', 10, '595959'), font('<b/>', 20, 'C23B3B'), font('<b/>', 20, '2E9E5B')];
+    const fonts = [font(), font('<b/>'), font('<b/>', 16, '1F3864'), font('<i/>', 9, '666666'),
+      font('<b/>', 10, 'FFFFFF'), font('<b/>', 11, '1F3864'), font('<b/>', 18, '1F3864'),
+      font('', 9, '595959'), font('<b/>', 18, 'C23B3B'), font('<b/>', 18, '2E9E5B')];
     const solid = rgb => `<fill><patternFill patternType="solid"><fgColor rgb="FF${rgb}"/><bgColor indexed="64"/></patternFill></fill>`;
     const fills = ['<fill><patternFill patternType="none"/></fill>', '<fill><patternFill patternType="gray125"/></fill>',
       solid('D9E1F2'), solid('91243E'), solid('DD4B50'), solid('F18C43'), solid('F8C851'), solid('67ACE1'),
@@ -1019,10 +1023,11 @@ function mergeWorkerMain() {
       `<border>${side('left', l && rgb)}${side('right', r && rgb)}${side('top', t && rgb)}${side('bottom', b && rgb)}<diagonal/></border>`;
     // 0 none, 1 table grid, 2 KPI tile top half, 3 KPI tile bottom half
     const borders = [border(0, 0, 0, 0), border(1, 1, 1, 1, 'BFBFBF'), border(1, 1, 1, 0, 'B4C6E7'), border(1, 1, 0, 1, 'B4C6E7')];
-    const xf = ({ font = 0, fill = 0, num = 0, bd = 0, h = '', v = 'center', wrap = false } = {}) =>
+    const xf = ({ font = 0, fill = 0, num = 0, bd = 0, h = '', v = 'center', wrap = false, indent = 0 } = {}) =>
       `<xf numFmtId="${num}" fontId="${font}" fillId="${fill}" borderId="${bd}" xfId="0"` +
       `${font ? ' applyFont="1"' : ''}${fill ? ' applyFill="1"' : ''}${num ? ' applyNumberFormat="1"' : ''}` +
-      `${bd ? ' applyBorder="1"' : ''} applyAlignment="1"><alignment${h ? ` horizontal="${h}"` : ''} vertical="${v}"${wrap ? ' wrapText="1"' : ''}/></xf>`;
+      `${bd ? ' applyBorder="1"' : ''} applyAlignment="1"><alignment${h ? ` horizontal="${h}"` : ''} vertical="${v}"` +
+      `${indent ? ` indent="${indent}"` : ''}${wrap ? ' wrapText="1"' : ''}/></xf>`;
     const label = (font, fill) => xf({ font, fill, bd: 1, h: 'center' });
     const xfs = [
       xf({ v: 'bottom' }),                                              // 0 default
@@ -1030,13 +1035,13 @@ function mergeWorkerMain() {
       xf({ font: 2, h: 'center' }),                                     // 2 title
       xf({ font: 1 }),                                                  // 3 bold
       xf({ num: 10, h: 'center' }),                                     // 4 pct
-      xf({ font: 3, h: 'left', wrap: true }),                           // 5 note
+      xf({ font: 3, h: 'left', wrap: true, indent: 1 }),                // 5 note
       label(4, 3), label(4, 4), label(4, 5), label(1, 6), label(1, 7),  // 6-10 severity labels
       label(4, 8), label(4, 9), label(1, 10), label(1, 11),             // 11-14 compliance labels
       xf({ font: 5, v: 'bottom' }),                                     // 15 section heading
-      xf({ bd: 1, h: 'left', wrap: true }),                             // 16 table text
+      xf({ bd: 1, h: 'left', wrap: true, indent: 1 }),                  // 16 table text
       xf({ bd: 1, h: 'center' }),                                       // 17 table number
-      xf({ font: 1, bd: 1, h: 'left' }),                                // 18 table text, bold
+      xf({ font: 1, bd: 1, h: 'left', indent: 1 }),                     // 18 table text, bold
       xf({ font: 1, bd: 1, h: 'center' }),                              // 19 table number, bold
       xf({ num: 10, bd: 1, h: 'center' }),                              // 20 table percent
       xf({ font: 6, fill: 12, bd: 2, h: 'center' }),                    // 21 KPI value
@@ -1045,6 +1050,8 @@ function mergeWorkerMain() {
       xf({ font: 9, fill: 12, bd: 2, h: 'center' }),                    // 24 KPI value, good
       xf({ font: 6, fill: 12, bd: 2, h: 'center', num: 10 }),           // 25 KPI percent
       xf({ font: 3, h: 'center' }),                                     // 26 subtitle
+      xf({ bd: 1, h: 'left', indent: 1 }),                              // 27 findings text
+      xf({ bd: 1, h: 'center' }),                                       // 28 findings number
     ];
     return XML_DECL + `<styleSheet xmlns="${NS_MAIN}">` +
       `<fonts count="${fonts.length}">${fonts.join('')}</fonts>` +
@@ -1065,7 +1072,9 @@ function mergeWorkerMain() {
     const dPts = c.colors.map((rgb, i) =>
       `<c:dPt><c:idx val="${i}"/>${c.type === 'bar' ? '<c:invertIfNegative val="0"/>' : ''}<c:bubble3D val="0"/>` +
       `<c:spPr><a:solidFill><a:srgbClr val="${rgb}"/></a:solidFill></c:spPr></c:dPt>`).join('');
-    const labels = `<c:dLbls><c:showLegendKey val="0"/><c:showVal val="${c.type === 'bar' ? 1 : 0}"/>` +
+    // No label on empty doughnut slices (Excel would print "0%").
+    const hideZero = c.type === 'bar' ? '' : c.vals.map((v, i) => (v ? '' : `<c:dLbl><c:idx val="${i}"/><c:delete val="1"/></c:dLbl>`)).join('');
+    const labels = `<c:dLbls>${hideZero}<c:showLegendKey val="0"/><c:showVal val="${c.type === 'bar' ? 1 : 0}"/>` +
       `<c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="${c.type === 'bar' ? 0 : 1}"/>` +
       '<c:showBubbleSize val="0"/></c:dLbls>';
     const ser = '<c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:v>Count</c:v></c:tx>' +
@@ -1080,7 +1089,8 @@ function mergeWorkerMain() {
         '<c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/><c:crossAx val="5002"/><c:crosses val="autoZero"/>' +
         '<c:auto val="1"/><c:lblAlgn val="ctr"/><c:lblOffset val="100"/><c:noMultiLvlLbl val="0"/></c:catAx>' +
         '<c:valAx><c:axId val="5002"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/>' +
-        '<c:axPos val="l"/><c:majorGridlines/><c:numFmt formatCode="General" sourceLinked="1"/>' +
+        '<c:axPos val="l"/><c:majorGridlines><c:spPr><a:ln w="6350"><a:solidFill><a:srgbClr val="D9D9D9"/></a:solidFill></a:ln></c:spPr></c:majorGridlines>' +
+        '<c:numFmt formatCode="General" sourceLinked="1"/>' +
         '<c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>' +
         '<c:crossAx val="5001"/><c:crosses val="autoZero"/><c:crossBetween val="between"/></c:valAx>'
       : '<c:doughnutChart><c:varyColors val="1"/>' + ser + '<c:firstSliceAng val="0"/><c:holeSize val="55"/></c:doughnutChart>';
@@ -1089,11 +1099,13 @@ function mergeWorkerMain() {
       `xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${NS_REL}">` +
       '<c:roundedCorners val="0"/><c:chart>' +
       '<c:title><c:tx><c:rich><a:bodyPr/><a:p><a:pPr><a:defRPr sz="1200" b="1"/></a:pPr>' +
-      `<a:r><a:rPr lang="en-US" sz="1200" b="1"/><a:t>${xmlEscape(c.title)}</a:t></a:r></a:p></c:rich></c:tx>` +
+      `<a:r><a:rPr lang="en-US" sz="1200" b="1"><a:latin typeface="Arial"/></a:rPr><a:t>${xmlEscape(c.title)}</a:t></a:r></a:p></c:rich></c:tx>` +
       '<c:overlay val="0"/></c:title><c:autoTitleDeleted val="0"/>' +
       `<c:plotArea><c:layout/>${plot}</c:plotArea>` +
       (c.type === 'bar' ? '' : '<c:legend><c:legendPos val="r"/><c:overlay val="0"/></c:legend>') +
-      '<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart></c:chartSpace>';
+      '<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart>' +
+      '<c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="900"><a:latin typeface="Arial"/></a:defRPr></a:pPr>' +
+      '<a:endParaRPr lang="en-US"/></a:p></c:txPr></c:chartSpace>';
   }
 
   function drawingXml(anchors) {
@@ -1130,8 +1142,9 @@ function mergeWorkerMain() {
     }
 
     cellXml(v, ref, style) {
-      if (v === undefined || v === '') return '';
-      if (NUMERIC.test(v) && !style) return `<c r="${ref}"><v>${v}</v></c>`;
+      if (v === undefined || v === '') return style ? '' : `<c r="${ref}" s="${ST.cellText}"/>`;
+      if (NUMERIC.test(v) && !style) return `<c r="${ref}" s="${ST.cellNum}"><v>${v}</v></c>`;
+      if (!style) style = ST.cellText;
       if (v.length > XLSX_MAX_CELL) {
         v = v.slice(0, XLSX_MAX_CELL - 12) + ' [truncated]';
         this.truncated++;
@@ -1174,7 +1187,7 @@ function mergeWorkerMain() {
 
     sheetName(i) { return findingsSheetName(i); }
 
-    sheetHead({ widths, freeze, selected, gridlines = true, print = false }) {
+    sheetHead({ widths, freeze, selected, gridlines = true, print = false, rowHeight = 20 }) {
       const cols = widths.map((w, j) => `<col min="${j + 1}" max="${j + 1}" width="${w}" customWidth="1"/>`).join('');
       return XML_DECL + `<worksheet xmlns="${NS_MAIN}" xmlns:r="${NS_REL}">` +
         (print ? '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>' : '') +
@@ -1182,7 +1195,8 @@ function mergeWorkerMain() {
         (freeze
           ? '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/>'
           : '<selection activeCell="A1" sqref="A1"/>') +
-        `</sheetView></sheetViews><sheetFormatPr defaultRowHeight="15"/>${cols ? `<cols>${cols}</cols>` : ''}<sheetData>`;
+        `</sheetView></sheetViews><sheetFormatPr defaultRowHeight="${rowHeight}" customHeight="1"/>` +
+        `${cols ? `<cols>${cols}</cols>` : ''}<sheetData>`;
     }
 
     async beginSheet() {
@@ -1192,7 +1206,7 @@ function mergeWorkerMain() {
       this.stream = stream;
       const widths = this.cols.map(c => COLUMN_WIDTHS[c.toLowerCase()] || 16);
       await stream.write(this.sheetHead({ widths, freeze: true, selected: i === 0 && !this.withSummary }) +
-        this.rowXml(this.cols, 1, ST.header));
+        this.rowXml(this.cols, 1, ST.header).replace('<row r="1">', '<row r="1" ht="24" customHeight="1">'));
     }
 
     async endSheet() {
@@ -1223,7 +1237,17 @@ function mergeWorkerMain() {
       let xml = this.sheetHead({ widths: spec.widths, freeze: spec.freeze, selected, gridlines: spec.gridlines !== false, print: !!spec.print });
       for (let r = 0; r < spec.rows.length; r++) {
         const cells = spec.rows[r];
-        const ht = spec.heights && spec.heights[r];
+        let ht = spec.heights && spec.heights[r];
+        if (!ht && spec.autoHeight && cells) {
+          // Rows have a fixed default height, so give wrapped text room.
+          let lines = 1;
+          cells.forEach((cell, c) => {
+            if (cell && typeof cell === 'object' && cell.s === ST.td && typeof cell.v === 'string') {
+              lines = Math.max(lines, Math.ceil(cell.v.length / ((spec.widths[c] || 10) * 1.25 - 2)));
+            }
+          });
+          if (lines > 1) ht = Math.min(lines, 10) * 15 + 6;
+        }
         if ((!cells || !cells.length) && !ht) continue;
         xml += `<row r="${r + 1}"${ht ? ` ht="${ht}" customHeight="1"` : ''}>`;
         if (!cells) { xml += '</row>'; continue; }
@@ -1408,6 +1432,15 @@ function mergeWorkerMain() {
     get compTotal() { return this.comp.reduce((a, b) => a + b, 0); }
   }
 
+  // Plain summary-sheet values -> bordered, padded table cells.
+  const tableCells = cells => cells.map(c => {
+    if (c === null || c === undefined || c === '') return { v: '', s: ST.tdNum };
+    if (typeof c === 'number') return { v: c, s: ST.tdNum };
+    if (typeof c === 'string') return { v: c, s: ST.td };
+    if (c.s === ST.pct) return { v: c.v, s: ST.tdPct };
+    return c;
+  });
+
   const ratio = (n, d) => (d ? n / d : 0);
   const asNumber = v => (NUMERIC.test(v) ? Number(v) : v);
   const passRate = comp => ratio(comp[0], comp[0] + comp[1] + comp[2]);
@@ -1473,12 +1506,12 @@ function mergeWorkerMain() {
         }
       }
       rows.push(cells);
-      const auto = lines > 1 ? Math.min(lines, 8) * 15 + 3 : 0;
-      if (ht || auto) heights[r - 1] = Math.max(ht || 0, auto);
+      const auto = lines > 1 ? Math.min(lines, 8) * 15 + 6 : 0;
+      heights[r - 1] = Math.max(ht || 20, auto);
       return r;
     };
     const full = (v, s, ht) => line([{ v, s, span: GRID }], ht);
-    const head = labels => line(labels.map(([v, span]) => ({ v, s: ST.header, span })), 20);
+    const head = labels => line(labels.map(([v, span]) => ({ v, s: ST.header, span })), 24);
 
     full('Tenable Report — Merged Summary', ST.title, 34);
     full(`Generated ${meta.generated} from ${meta.reports} report${meta.reports === 1 ? '' : 's'}`, ST.subtitle, 18);
@@ -1671,9 +1704,9 @@ function mergeWorkerMain() {
         if (hasVulns) cells.push(...h.sev.slice(0, 5), h.sev.reduce((a, b) => a + b, 0));
         if (hasComp) cells.push(...h.comp, h.comp.some(Boolean) ? { v: passRate(h.comp), s: ST.pct } : null);
         if (showAuth) cells.push(agg.authHosts.has(key) ? { v: 'Yes', s: ST.failed } : null);
-        hostRows.push(cells);
+        hostRows.push(tableCells(cells));
       }
-      sheets.push({ name: T.Many, widths, rows: hostRows, freeze: true, filter: `A1:${colLetter(head.length - 1)}${hostRows.length}` });
+      sheets.push({ name: T.Many, widths, rows: hostRows, freeze: true, autoHeight: true, heights: { 0: 24 }, filter: `A1:${colLetter(head.length - 1)}${hostRows.length}` });
     }
 
     // --- Vulnerabilities
@@ -1682,12 +1715,12 @@ function mergeWorkerMain() {
       const head = ['Plugin ID', 'Name', ...(anyFamily ? ['Plugin Family'] : []), 'Severity', `${T.Many} Affected`, 'Occurrences', 'CVEs'];
       const vulnRows = [head.map(v => ({ v, s: ST.header }))];
       for (const [id, p] of pluginList.slice(0, XLSX_MAX_ROWS)) {
-        vulnRows.push([asNumber(id), p.name, ...(anyFamily ? [p.family] : []),
+        vulnRows.push(tableCells([asNumber(id), p.name, ...(anyFamily ? [p.family] : []),
           { v: SEVERITIES[p.sev][0], s: SEVERITIES[p.sev][1] }, p.hosts, p.rows,
-          [...p.cves].join(', ') + (p.cves.size >= MAX_CVES_PER_PLUGIN ? ', …' : '')]);
+          [...p.cves].join(', ') + (p.cves.size >= MAX_CVES_PER_PLUGIN ? ', …' : '')]));
       }
       sheets.push({
-        name: 'Vulnerabilities', widths: [10, 60, ...(anyFamily ? [24] : []), 10, 15, 13, 40], rows: vulnRows,
+        name: 'Vulnerabilities', widths: [10, 60, ...(anyFamily ? [24] : []), 10, 15, 13, 40], rows: vulnRows, autoHeight: true, heights: { 0: 24 },
         freeze: true, filter: `A1:${colLetter(head.length - 1)}${vulnRows.length}`,
       });
     }
@@ -1698,10 +1731,10 @@ function mergeWorkerMain() {
       const head = ['Check', ...(anyAudit ? ['Audit File'] : []), 'Passed', 'Failed', 'Warning / Manual', 'Error / other', 'Total', 'Pass rate'];
       const compRows = [head.map(v => ({ v, s: ST.header }))];
       for (const [check, c] of checkList.slice(0, XLSX_MAX_ROWS)) {
-        compRows.push([check, ...(anyAudit ? [c.audit] : []), ...c.comp, c.comp.reduce((a, b) => a + b, 0), { v: passRate(c.comp), s: ST.pct }]);
+        compRows.push(tableCells([check, ...(anyAudit ? [c.audit] : []), ...c.comp, c.comp.reduce((a, b) => a + b, 0), { v: passRate(c.comp), s: ST.pct }]));
       }
       sheets.push({
-        name: 'Compliance', widths: [80, ...(anyAudit ? [30] : []), 10, 10, 17, 13, 10, 11], rows: compRows,
+        name: 'Compliance', widths: [80, ...(anyAudit ? [30] : []), 10, 10, 17, 13, 10, 11], rows: compRows, autoHeight: true, heights: { 0: 24 },
         freeze: true, filter: `A1:${colLetter(head.length - 1)}${compRows.length}`,
       });
     }
@@ -1711,11 +1744,11 @@ function mergeWorkerMain() {
       const head = ['Host', 'IP Address', 'FQDN', 'OS', 'Auth Protocol', 'Port', 'User', 'Domain', 'Error', 'Plugin ID', 'Plugin Name', 'Plugin Output', 'Source Report'];
       const authRows = [head.map(v => ({ v, s: ST.header }))];
       for (const a of authList) {
-        authRows.push([a.host, a.ip, a.fqdn, a.os, a.parsed.protocol || a.protocol, asNumber(a.parsed.port || a.port),
-          a.parsed.user, a.parsed.domain, a.parsed.error, asNumber(a.plugin), a.name, a.output, a.source]);
+        authRows.push(tableCells([a.host, a.ip, a.fqdn, a.os, a.parsed.protocol || a.protocol, asNumber(a.parsed.port || a.port),
+          a.parsed.user, a.parsed.domain, a.parsed.error, asNumber(a.plugin), a.name, a.output, a.source]));
       }
       sheets.push({
-        name: 'Auth Failures', widths: [20, 15, 28, 28, 14, 8, 18, 14, 50, 10, 45, 60, 40], rows: authRows,
+        name: 'Auth Failures', widths: [20, 15, 28, 28, 14, 8, 18, 14, 50, 10, 45, 60, 40], rows: authRows, autoHeight: true, heights: { 0: 24 },
         freeze: true, filter: `A1:M${authRows.length}`,
       });
     }
@@ -1727,11 +1760,11 @@ function mergeWorkerMain() {
       const st = meta.perFile[i] || {};
       const where = st.sheetFirst === null || st.sheetFirst === undefined ? '—'
         : findingsSheetName(st.sheetFirst) + (st.sheetLast > st.sheetFirst ? ` to ${findingsSheetName(st.sheetLast)}` : '');
-      srcRows.push([src.name, src.kind === 'nessus' ? '.nessus' : 'CSV', st.rowsIn || 0, st.rowsOut || 0, where,
+      srcRows.push(tableCells([src.name, src.kind === 'nessus' ? '.nessus' : 'CSV', st.rowsIn || 0, st.rowsOut || 0, where,
         st.duplicates || 0, st.filtered || 0, st.excluded || 0, st.auth || 0,
-        st.error ? `Error: ${st.error}` : st.rowsIn && !st.rowsOut ? 'OK (no rows left after filters)' : 'OK']);
+        st.error ? `Error: ${st.error}` : st.rowsIn && !st.rowsOut ? 'OK (no rows left after filters)' : 'OK']));
     });
-    sheets.push({ name: 'Sources', widths: [60, 9, 12, 13, 26, 18, 13, 16, 13, 30], rows: srcRows, freeze: true, filter: `A1:J${srcRows.length}` });
+    sheets.push({ name: 'Sources', widths: [60, 9, 12, 13, 26, 18, 13, 16, 13, 30], rows: srcRows, freeze: true, autoHeight: true, heights: { 0: 24 }, filter: `A1:J${srcRows.length}` });
 
     return { sheets };
   }
