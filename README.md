@@ -27,7 +27,6 @@ Works offline and straight from disk (`file://`).
 
 | File | Purpose |
 | --- | --- |
-| `index.html` | Page markup |
-| `styles.css` | Styling (light/dark) |
+| `index.html` | Page markup and styling (inlined so it works from local files on any OS) |
 | `app.js` | UI: file handling, options, progress, results |
 | `merge-worker.js` | Streaming CSV parser and merge engine (runs in a Web Worker) |

@@ -4,18 +4,255 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tenable CSV Merger</title>
-  <!-- Inline so panels stay hidden even if styles.css is slow or blocked. -->
-  <style>[hidden] { display: none !important; }</style>
-  <link rel="stylesheet" href="styles.css">
+  <!-- Styles are inlined: on some Windows setups a bad registry MIME type for
+       .css makes browsers ignore stylesheets loaded from local files. -->
+  <style>
+    :root {
+      --bg: #f4f5f7;
+      --surface: #ffffff;
+      --surface-2: #f8f9fb;
+      --border: #e2e5ea;
+      --text: #1b1f27;
+      --muted: #646c7a;
+      --accent: #0d6e9e;
+      --accent-ink: #ffffff;
+      --accent-soft: #e3f1f8;
+      --danger: #c23b3b;
+      --warn-bg: #fff6e0;
+      --warn-border: #f0d48a;
+      --warn-text: #6d5100;
+      --ok: #1f8a4c;
+      --sev-critical: #91243e;
+      --sev-high: #dd4b50;
+      --sev-medium: #f18c43;
+      --sev-low: #e6b422;
+      --sev-none: #67ace1;
+      --radius: 10px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color-scheme: light;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #111318;
+        --surface: #1a1d24;
+        --surface-2: #20242c;
+        --border: #2e333d;
+        --text: #e7e9ee;
+        --muted: #99a1b0;
+        --accent: #4fb3e3;
+        --accent-ink: #0b1720;
+        --accent-soft: #15303f;
+        --danger: #ef6b6b;
+        --warn-bg: #2d2611;
+        --warn-border: #5d4c19;
+        --warn-text: #f0d48a;
+        --ok: #4cc382;
+        color-scheme: dark;
+      }
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    [hidden] { display: none !important; }
+
+    /* Thin, theme-coloured scrollbars (Windows defaults are wide and grey). */
+    * { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; border: 2px solid var(--surface); }
+    ::-webkit-scrollbar-track { background: transparent; }
+
+    button, input, select, textarea { font-family: inherit; }
+    svg { width: 20px; height: 20px; flex: none; }
+
+    .topbar {
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 24px;
+      padding: 14px 24px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+    .brand { display: flex; align-items: center; gap: 10px; color: var(--accent); }
+    .brand h1 { margin: 0; font-size: 17px; font-weight: 650; color: var(--text); letter-spacing: -0.01em; }
+    .privacy { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--muted); font-size: 13px; }
+    .privacy svg { width: 16px; height: 16px; color: var(--ok); }
+
+    main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; display: grid; gap: 16px; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      min-width: 0;
+    }
+    .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+    .card-head h2 { margin: 0; font-size: 15px; font-weight: 650; }
+    .head-actions { display: flex; gap: 8px; }
+    .count { color: var(--muted); font-weight: 500; }
+
+    /* Buttons */
+    .btn {
+      font: inherit; font-weight: 550;
+      border: 1px solid var(--border); background: var(--surface); color: var(--text);
+      border-radius: 8px; padding: 8px 14px; cursor: pointer;
+    }
+    .btn:hover:not(:disabled) { border-color: var(--accent); }
+    .btn:focus-visible, .dropzone:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+    .btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
+    .btn.ghost { background: transparent; }
+    .btn.small { padding: 4px 10px; font-size: 13px; }
+    .btn.danger { color: var(--danger); }
+    .btn.danger:hover:not(:disabled) { border-color: var(--danger); }
+
+    /* Drop zone */
+    .dropzone {
+      display: flex; flex-direction: column; align-items: center; text-align: center;
+      padding: 36px 16px;
+      border: 2px dashed var(--border); border-radius: var(--radius);
+      background: var(--surface-2);
+      transition: border-color .15s, background .15s;
+      cursor: pointer;
+    }
+    .dropzone svg { width: 34px; height: 34px; color: var(--accent); margin-bottom: 8px; }
+    .dropzone.over { border-color: var(--accent); background: var(--accent-soft); }
+    .dz-title { margin: 0; font-size: 16px; font-weight: 600; }
+    .dz-sub { margin: 4px 0 16px; color: var(--muted); }
+    .dz-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+
+    /* File table */
+    .table-wrap { max-height: 420px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+    table.files { width: 100%; border-collapse: collapse; font-size: 13px; }
+    table.files th {
+      position: sticky; top: 0; z-index: 1;
+      background: var(--surface-2); color: var(--muted); font-weight: 600; text-align: left;
+      padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap;
+    }
+    table.files td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    table.files tr:last-child td { border-bottom: none; }
+    table.files .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    table.files td.name { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 12.5px; }
+    table.files tr.active td { background: var(--accent-soft); }
+    .status { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+    .status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+    .status.ok::before { background: var(--ok); }
+    .status.warn::before { background: var(--sev-low); }
+    .status.err { color: var(--danger); }
+    .status.err::before { background: var(--danger); }
+    .remove {
+      border: none; background: none; color: var(--muted); cursor: pointer; font-size: 18px; line-height: 1;
+      padding: 2px 6px; border-radius: 6px;
+    }
+    .remove:hover { color: var(--danger); background: var(--surface-2); }
+    .remove:disabled { visibility: hidden; }
+
+    /* Notices */
+    .notice {
+      margin: 0 0 12px; padding: 10px 12px; border-radius: 8px;
+      background: var(--warn-bg); border: 1px solid var(--warn-border); color: var(--warn-text); font-size: 13px;
+    }
+
+    /* Options */
+    .options-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+    fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px 14px; margin: 0; min-width: 0; }
+    legend { padding: 0 6px; color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+    label.radio, label.check { display: flex; gap: 10px; align-items: flex-start; padding: 7px 0; cursor: pointer; }
+    label.radio input, label.check input { margin-top: 3px; accent-color: var(--accent); }
+    label.radio small, label.check small { display: block; color: var(--muted); font-size: 12.5px; }
+    label.field { display: grid; gap: 4px; margin-top: 8px; color: var(--muted); font-size: 12.5px; font-weight: 600; }
+    label.field input {
+      font: inherit; font-family: var(--mono); font-size: 13px; color: var(--text);
+      background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; width: 100%;
+    }
+    label.field input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+    /* Exclusion rules */
+    fieldset.rules { margin-top: 16px; }
+    .rules-intro { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+    .rule { padding: 8px 0; border-top: 1px dashed var(--border); }
+    .rule:first-child { border-top: none; padding-top: 0; }
+    .rule-fields { display: grid; grid-template-columns: minmax(140px, 220px) minmax(120px, 150px) 1fr auto; gap: 8px; align-items: start; }
+    .rule select, .rule textarea {
+      font-size: 13px; color: var(--text);
+      background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px;
+      padding: 7px 9px; width: 100%; min-width: 0; margin: 0;
+    }
+    .rule select { height: 34px; padding-top: 0; padding-bottom: 0; }
+    .rule textarea { font-family: var(--mono); resize: vertical; min-height: 34px; line-height: 1.4; }
+    .rule select:focus, .rule textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+    .rule .remove { margin-top: 4px; }
+    .rule-meta { margin-top: 4px; color: var(--muted); font-size: 12px; }
+    .rule-meta.err { color: var(--danger); }
+    .rules-tools { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    .rule-results h3 { margin: 16px 0 6px; font-size: 13px; }
+    .rule-results ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+
+    /* Columns */
+    details.columns { margin-top: 16px; border: 1px solid var(--border); border-radius: 8px; }
+    details.columns summary {
+      display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+      padding: 10px 14px; cursor: pointer; font-weight: 600;
+    }
+    .col-note { color: var(--muted); font-weight: 400; font-size: 13px; }
+    .col-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 0 14px 10px; }
+    .legend { color: var(--muted); font-size: 12.5px; margin-left: auto; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 14px 14px; }
+    .chip {
+      font: inherit; font-size: 12.5px;
+      border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px;
+      background: var(--surface-2); color: var(--muted); cursor: pointer; text-decoration: line-through;
+    }
+    .chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--text); text-decoration: none; }
+    .chip.partial { border-style: dashed; }
+    .chip.sample { cursor: default; text-decoration: none; padding: 1px 8px; }
+
+    .merge-bar { display: flex; align-items: center; gap: 14px; margin-top: 18px; flex-wrap: wrap; }
+    .merge-hint { color: var(--muted); font-size: 13px; }
+
+    /* Progress */
+    .progress { height: 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); overflow: hidden; }
+    #progress-fill { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+    .progress-meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; font-variant-numeric: tabular-nums; flex-wrap: wrap; }
+    #progress-pct { font-weight: 650; }
+    #progress-detail { color: var(--muted); }
+    .progress-file { margin: 6px 0 0; color: var(--muted); font-family: var(--mono); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* Results */
+    .result-saved { margin: -4px 0 14px; color: var(--ok); font-weight: 550; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+    .stat { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+    .stat .v { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+    .stat .k { color: var(--muted); font-size: 12.5px; }
+    .severity { margin-top: 16px; }
+    .sev-bar { display: flex; height: 12px; border-radius: 999px; overflow: hidden; background: var(--surface-2); }
+    .sev-bar span { display: block; height: 100%; }
+    .sev-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; font-size: 13px; }
+    .sev-legend span { display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+    .sev-legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+    #result-notices { margin-top: 14px; }
+
+    @media (max-width: 640px) {
+      .topbar { padding: 12px 16px; }
+      .card { padding: 16px; }
+      table.files td.name { max-width: 160px; }
+      .rule-fields { grid-template-columns: 1fr 1fr auto; }
+      .rule textarea { grid-column: 1 / -1; grid-row: 2; }
+    }
+  </style>
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h7v6H4zM13 5h7v6h-7zM4 13h16v6H4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M4 5h7v6H4zM13 5h7v6h-7zM4 13h16v6H4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
       <h1>Tenable CSV Merger</h1>
     </div>
     <p class="privacy">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
       Processed entirely in your browser. Nothing is uploaded.
     </p>
   </header>
@@ -23,7 +260,7 @@
   <main>
     <section class="card" id="drop-card">
       <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Add CSV reports">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0l-4 4m4-4l4 4M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 16V4m0 0l-4 4m4-4l4 4M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <p class="dz-title">Drop Tenable / Nessus CSV exports here</p>
         <p class="dz-sub">Files or whole folders. Any number, any size.</p>
         <div class="dz-actions">
