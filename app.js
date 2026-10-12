@@ -2,6 +2,9 @@
 (() => {
   'use strict';
 
+  // Shown in the page header and stamped on every workbook's dashboard, so a
+  // report can be traced to the build that produced it.
+  const APP_VERSION = '2026.10.12-2';
   const EXCEL_MAX_ROWS = 1048575; // 1,048,576 minus the header row
   const SEVERITY_ORDER = [
     ['critical', 'Critical', 'var(--sev-critical)'],
@@ -743,6 +746,7 @@
         format: outputFormat(),
         summary: el.optSummary.checked,
         mode: reportMode(),
+        appVersion: APP_VERSION,
         identity: targetIdentity(),
         findingsRows: document.querySelector('input[name="rows"]:checked').value,
         authPlugins: authPluginIds(),
@@ -1001,6 +1005,8 @@
     try { localStorage.setItem(AUTH_STORAGE_KEY, el.optAuth.value); } catch (_) { /* unavailable */ }
     clearResult();
   });
+
+  document.getElementById('app-version').textContent = `v${APP_VERSION}`;
 
   loadColumns();
   loadRules();

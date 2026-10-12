@@ -1532,7 +1532,8 @@ function mergeWorkerMain() {
     const head = labels => line(labels.map(([v, span]) => ({ v, s: ST.header, span })), 24);
 
     full('Tenable Report — Merged Summary', ST.title, 34);
-    full(`Generated ${meta.generated} from ${meta.reports} report${meta.reports === 1 ? '' : 's'}`, ST.subtitle, 18);
+    full(`Generated ${meta.generated} from ${meta.reports} report${meta.reports === 1 ? '' : 's'}` +
+      (meta.appVersion ? ` · Tenable Report Merger v${meta.appVersion}` : ''), ST.subtitle, 18);
     blank(10);
 
     // KPI tiles: 4 per row (2 columns each); a short last row is centred.
@@ -2037,6 +2038,7 @@ function mergeWorkerMain() {
         excluded: totals.filtered + totals.excluded,
         authPlugins: [...authIds],
         identity,
+        appVersion: options.appVersion || '',
         findingsSheets: out.sheetRows ? out.sheetRows.length : 1,
         sources,
         perFile,
