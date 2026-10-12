@@ -22,6 +22,7 @@
     optDisk: $('opt-disk'), optDiskWrap: $('opt-disk-wrap'), optName: $('opt-name'),
     colCount: $('col-count'), colNote: $('col-note'), colChips: $('col-chips'), colSearch: $('col-search'),
     optSummary: $('opt-summary'), optSummaryWrap: $('opt-summary-wrap'), modeHelp: $('mode-help'), optAuth: $('opt-auth'),
+    identityHelp: $('identity-help'),
     mergeBtn: $('merge-btn'), mergeHint: $('merge-hint'),
     progressCard: $('progress-card'), progressTitle: $('progress-title'), progressBar: $('progress-bar'),
     progressFill: $('progress-fill'), progressPct: $('progress-pct'), progressDetail: $('progress-detail'),
@@ -741,6 +742,7 @@
         format: outputFormat(),
         summary: el.optSummary.checked,
         mode: reportMode(),
+        identity: targetIdentity(),
         authPlugins: authPluginIds(),
         bom: el.optBom.checked,
         rules: activeRules().map(r => ({ column: r.column, op: r.op, values: ruleValues(r) })),
@@ -808,9 +810,9 @@
       [fmtNum(stats.duplicates), 'Duplicates removed'],
       [fmtNum(stats.filtered), 'Info rows excluded'],
       [fmtNum(stats.excluded), 'Removed by rules'],
-      [fmtNum(stats.uniqueHosts), 'Unique hosts'],
+      [fmtNum(stats.uniqueHosts), stats.identity === 'host' ? 'Unique hosts' : 'Targets'],
       ...(compTotal(stats) ? [[`${(passRate(stats.compliance) * 100).toFixed(1)}%`, 'Compliance pass rate']] : []),
-      ...(stats.authHosts != null ? [[fmtNum(stats.authHosts), 'Hosts with failed authentication']] : []),
+      ...(stats.authHosts != null ? [[fmtNum(stats.authHosts), `${stats.identity === 'host' ? 'Hosts' : 'Targets'} with failed authentication`]] : []),
       [fmtNum(stats.columns), 'Columns'],
       [fmtBytes(stats.bytesOut), 'Output size'],
       [fmtDuration(elapsed), 'Time taken'],
@@ -963,6 +965,28 @@
   } catch (_) { /* unavailable */ }
   for (const r of document.querySelectorAll('input[name="mode"]')) r.addEventListener('change', syncMode);
   el.modeHelp.textContent = MODE_HELP[reportMode()];
+
+  // Target identity: what makes two rows belong to the same host / database.
+  const IDENTITY_STORAGE_KEY = 'tenable-merger.identity.v1';
+  const IDENTITY_HELP = {
+    host: 'Rows with the same host name belong to one target. Duplicates are removed across all reports.',
+    hostip: 'Host name + IP address identify a target, so e.g. Oracle RAC nodes sharing a host name are kept separate.',
+    report: 'Each report is a separate target (e.g. one database per scan, even when several databases share a host). Duplicates are only removed within the same report; per-target counts never mix reports.',
+  };
+  const targetIdentity = () => document.querySelector('input[name="identity"]:checked').value;
+  try {
+    const saved = localStorage.getItem(IDENTITY_STORAGE_KEY);
+    const radio = saved && document.querySelector(`input[name="identity"][value="${CSS.escape(saved)}"]`);
+    if (radio) radio.checked = true;
+  } catch (_) { /* unavailable */ }
+  el.identityHelp.textContent = IDENTITY_HELP[targetIdentity()];
+  for (const r of document.querySelectorAll('input[name="identity"]')) {
+    r.addEventListener('change', () => {
+      el.identityHelp.textContent = IDENTITY_HELP[targetIdentity()];
+      try { localStorage.setItem(IDENTITY_STORAGE_KEY, targetIdentity()); } catch (_) { /* unavailable */ }
+      clearResult();
+    });
+  }
 
   // Plugin IDs reported as authentication failures (default 104410).
   const AUTH_STORAGE_KEY = 'tenable-merger.auth-plugins.v1';

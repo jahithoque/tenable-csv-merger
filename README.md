@@ -26,6 +26,18 @@ Works offline and straight from disk (`file://`).
 
 The choice is remembered in your browser.
 
+### Target identity
+
+How rows are grouped into targets, for duplicate removal and every per-target count (Hosts/Targets sheet, top 10, pass rates, affected counts, authentication failures):
+
+| Setting | Use when |
+| --- | --- |
+| **Host name** (default) | One scan target per host name. Duplicates are removed across all reports. |
+| **Host + IP address** | Several machines report the same host name, e.g. Oracle RAC nodes. |
+| **Host + report** | Each report scans a separate target, e.g. one Oracle database per scan even when several databases share a host or RAC. Duplicates are only removed within the same report, so identical results from two databases are both kept. |
+
+With anything other than *Host name*, the Hosts sheet becomes **Targets** with Host, IP Address (and Report) columns. The choice is remembered in your browser.
+
 ### Authentication failures
 
 Rows from the plugin IDs in **Authentication failures** (default `104410`, *Target Credential Status by Authentication Protocol - Failure for Provided Credentials*) are reported separately: a dashboard section with the number of affected hosts and a table of protocol / port / user / error parsed from the plugin output, an **Auth Failures** sheet, and an *Auth Failed* column on the Hosts sheet. They are never counted as compliance checks or vulnerabilities and, in the Excel workbook, appear only on the Auth Failures sheet, not in Findings (CSV output keeps them, as it has no separate sheet). An explicit exclusion rule still removes them entirely. Add more IDs (e.g. `21745`) comma-separated, or clear the field to turn this off.

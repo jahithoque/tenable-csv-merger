@@ -322,6 +322,16 @@
       </fieldset>
 
       <fieldset class="report-type">
+        <legend>Target identity</legend>
+        <div class="format" role="radiogroup" aria-label="Target identity">
+          <label><input type="radio" name="identity" value="host" checked><span>Host name</span></label>
+          <label><input type="radio" name="identity" value="hostip"><span>Host + IP address</span></label>
+          <label><input type="radio" name="identity" value="report"><span>Host + report</span></label>
+        </div>
+        <p class="mode-help" id="identity-help"></p>
+      </fieldset>
+
+      <fieldset class="report-type">
         <legend>Authentication failures</legend>
         <label class="field inline-field">Plugin IDs to report separately
           <input type="text" id="opt-auth" value="104410" spellcheck="false" placeholder="e.g. 104410, 21745">

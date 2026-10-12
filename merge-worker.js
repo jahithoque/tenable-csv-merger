@@ -1302,32 +1302,34 @@ function mergeWorkerMain() {
     constructor() {
       this.sev = [0, 0, 0, 0, 0, 0];
       this.comp = [0, 0, 0, 0];
-      this.hosts = new Map();       // host -> { ip, fqdn, os, sev[6], comp[4] }
+      this.hosts = new Map();       // target key -> { host, ip, fqdn, os, report, sev[6], comp[4] }
       this.plugins = new Map();     // plugin id -> { name, family, sev, rows, hosts, cves }
       this.checks = new Map();      // check name -> { audit, comp[4] }
-      this.pairs = new HashSet64(); // (plugin, host) pairs, for "hosts affected"
+      this.pairs = new HashSet64(); // (plugin, target) pairs, for "targets affected"
       this.sevHosts = [new Set(), new Set(), new Set(), new Set(), new Set(), new Set()];
       this.auth = [];               // one entry per distinct failed-login finding
       this.authSeen = new HashSet64();
       this.authHosts = new Set();
     }
 
+    // a.key is the target key (see targetKey in merge), so failures of two
+    // databases on one host are kept apart when targets include the report.
     addAuth(a) {
-      const [x, y] = hash64([a.host, a.plugin, a.protocol, a.port, a.output].join('\x1f'));
-      if (!this.authSeen.add(x, y)) return; // same finding from another scan
-      if (a.host) { this.authHosts.add(a.host); this.host(a.host, a.ip, a.fqdn, a.os); }
+      const [x, y] = hash64([a.key, a.plugin, a.protocol, a.port, a.output].join('\x1f'));
+      if (!this.authSeen.add(x, y)) return; // same finding seen again for this target
+      if (a.key) { this.authHosts.add(a.key); this.host(a.key, a); }
       if (this.auth.length < XLSX_MAX_ROWS) this.auth.push({ ...a, parsed: parseAuthOutput(a.output) });
     }
 
-    host(name, ip, fqdn, os) {
-      let h = this.hosts.get(name);
+    host(key, info) {
+      let h = this.hosts.get(key);
       if (!h) {
-        h = { ip: '', fqdn: '', os: '', sev: [0, 0, 0, 0, 0, 0], comp: [0, 0, 0, 0] };
-        this.hosts.set(name, h);
+        h = { host: info.host || '', ip: '', fqdn: '', os: '', report: info.report || '', sev: [0, 0, 0, 0, 0, 0], comp: [0, 0, 0, 0] };
+        this.hosts.set(key, h);
       }
-      if (!h.ip && ip) h.ip = ip;
-      if (!h.fqdn && fqdn) h.fqdn = fqdn;
-      if (!h.os && os) h.os = os;
+      if (!h.ip && info.ip) h.ip = info.ip;
+      if (!h.fqdn && info.fqdn) h.fqdn = info.fqdn;
+      if (!h.os && info.os) h.os = info.os;
       return h;
     }
 
@@ -1370,8 +1372,17 @@ function mergeWorkerMain() {
   const passRate = comp => ratio(comp[0], comp[0] + comp[1] + comp[2]);
   const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
+  const IDENTITY_NOTES = {
+    hostip: 'Targets are host name + IP address (e.g. Oracle RAC nodes that share a host name are counted separately).',
+    report: 'Targets are host + report: each report is treated as a separate database, even when several share a host.',
+  };
+
   function buildSummary(agg, meta) {
     const sheets = [];
+    const byHost = meta.identity === 'host';
+    const T = byHost ? { one: 'host', Many: 'Hosts', many: 'hosts' } : { one: 'target', Many: 'Targets', many: 'targets' };
+    const showReport = meta.identity === 'report';
+    const label = h => h.host + (h.ip && h.ip !== h.host && !byHost ? ` (${h.ip})` : '') + (showReport && h.report ? ` — ${h.report}` : '');
     const hasVulns = agg.vulnTotal > 0;
     const hasComp = agg.compTotal > 0;
     const sevRows = SEVERITIES.filter((s, i) => i < 5 || agg.sev[5] > 0);
@@ -1381,7 +1392,7 @@ function mergeWorkerMain() {
       const a = x[1], b = y[1];
       for (let i = 0; i < 4; i++) if (a.sev[i] !== b.sev[i]) return b.sev[i] - a.sev[i];
       if (a.comp[1] !== b.comp[1]) return b.comp[1] - a.comp[1];
-      return collator.compare(x[0], y[0]);
+      return collator.compare(a.host, b.host) || collator.compare(a.ip, b.ip) || collator.compare(a.report, b.report);
     });
     const pluginList = [...agg.plugins].sort((x, y) =>
       x[1].sev - y[1].sev || y[1].hosts - x[1].hosts || y[1].rows - x[1].rows || collator.compare(x[0], y[0]));
@@ -1399,34 +1410,36 @@ function mergeWorkerMain() {
     add({ v: 'Overview', s: ST.section });
     add({ v: 'Metric', s: ST.header }, { v: 'Value', s: ST.header });
     add('Reports merged', meta.reports);
-    add('Hosts', agg.hosts.size);
+    add(T.Many, agg.hosts.size);
     if (hasVulns) add('Vulnerability findings', agg.vulnTotal);
     if (hasVulns) add('Unique vulnerabilities (plugins)', agg.plugins.size);
     if (hasComp) add('Compliance checks evaluated', agg.compTotal);
     if (hasComp) add({ v: 'Compliance score', s: ST.bold }, { v: compScore, s: ST.pct });
     if (meta.authPlugins.length) {
-      add({ v: 'Hosts with failed authentication', s: ST.bold }, { v: agg.authTotal, s: agg.authTotal ? ST.failed : ST.passed });
+      add({ v: `${T.Many} with failed authentication`, s: ST.bold }, { v: agg.authTotal, s: agg.authTotal ? ST.failed : ST.passed });
     }
     add('Duplicates removed', meta.duplicates);
     add('Rows excluded (informational / rules)', meta.excluded);
+    if (IDENTITY_NOTES[meta.identity]) add({ v: IDENTITY_NOTES[meta.identity], s: ST.note });
     if (meta.findingsSheets > 1) {
       add({ v: 'Findings sheets', s: ST.bold }, { v: meta.findingsSheets, s: ST.bold });
       add({ v: `Findings continue across ${meta.findingsSheets} sheets (Findings to ${findingsSheetName(meta.findingsSheets - 1)}). Excel allows at most 1,048,576 rows per sheet; the Sources sheet shows which sheet holds each report.`, s: ST.note });
     }
     blank();
 
-    const authList = agg.auth.slice().sort((x, y) => collator.compare(x.host, y.host) || collator.compare(x.port, y.port));
+    const authList = agg.auth.slice().sort((x, y) =>
+      collator.compare(x.host, y.host) || collator.compare(x.ip, y.ip) || collator.compare(x.source, y.source) || collator.compare(x.port, y.port));
     if (meta.authPlugins.length) {
       add({ v: `Authentication failures (plugin ${meta.authPlugins.join(', ')})`, s: ST.section });
       if (!authList.length) {
         add({ v: 'No authentication failures found — credentials worked on every host that reported.', s: ST.passed });
       } else {
-        add({ v: `${agg.authTotal} host${agg.authTotal === 1 ? '' : 's'} could not be scanned with the provided credentials, so their results may be incomplete.`, s: ST.note });
-        add(...['Host', 'IP Address', 'Auth protocol', 'Port', 'User', 'Error'].map(v => ({ v, s: ST.header })));
+        add({ v: `${agg.authTotal} ${agg.authTotal === 1 ? T.one : T.many} could not be scanned with the provided credentials, so their results may be incomplete.`, s: ST.note });
+        add(...['Host', 'IP Address', ...(showReport ? ['Report'] : []), 'Auth protocol', 'Port', 'User', 'Error'].map(v => ({ v, s: ST.header })));
         const AUTH_ON_DASHBOARD = 25;
         for (const a of authList.slice(0, AUTH_ON_DASHBOARD)) {
           const errText = a.parsed.error || (a.output ? a.output.replace(/\s+/g, ' ').slice(0, 200) : '');
-          add({ v: a.host, s: ST.failed }, a.ip, a.parsed.protocol || a.protocol, asNumber(a.parsed.port || a.port), a.parsed.user, errText);
+          add({ v: a.host, s: ST.failed }, a.ip, ...(showReport ? [a.source] : []), a.parsed.protocol || a.protocol, asNumber(a.parsed.port || a.port), a.parsed.user, errText);
         }
         if (authList.length > AUTH_ON_DASHBOARD) {
           add({ v: `… and ${authList.length - AUTH_ON_DASHBOARD} more. See the "Auth Failures" sheet.`, s: ST.note });
@@ -1438,7 +1451,7 @@ function mergeWorkerMain() {
     let chartRow = 3; // zero-based anchor row for the next chart
     if (hasVulns) {
       add({ v: 'Vulnerabilities by severity', s: ST.section });
-      add({ v: 'Severity', s: ST.header }, { v: 'Findings', s: ST.header }, { v: '% of findings', s: ST.header }, { v: 'Hosts affected', s: ST.header });
+      add({ v: 'Severity', s: ST.header }, { v: 'Findings', s: ST.header }, { v: '% of findings', s: ST.header }, { v: `${T.Many} affected`, s: ST.header });
       const first = rows.length + 1;
       for (const sev of sevRows) {
         const i = SEVERITIES.indexOf(sev);
@@ -1477,13 +1490,13 @@ function mergeWorkerMain() {
     }
 
     if (hostList.length) {
-      add({ v: 'Top 10 hosts by risk', s: ST.section });
-      const head = [{ v: 'Host', s: ST.header }];
+      add({ v: `Top 10 ${T.many} by risk`, s: ST.section });
+      const head = [{ v: byHost ? 'Host' : 'Target', s: ST.header }];
       if (hasVulns) head.push(...['Critical', 'High', 'Medium', 'Low'].map(v => ({ v, s: ST.header })));
       if (hasComp) head.push({ v: 'Failed checks', s: ST.header }, { v: 'Pass rate', s: ST.header });
       add(...head);
-      for (const [name, h] of hostList.slice(0, 10)) {
-        const cells = [name];
+      for (const [, h] of hostList.slice(0, 10)) {
+        const cells = [label(h)];
         if (hasVulns) cells.push(...h.sev.slice(0, 4));
         if (hasComp) cells.push(h.comp[1], h.comp.some(Boolean) ? { v: passRate(h.comp), s: ST.pct } : null);
         add(...cells);
@@ -1492,7 +1505,7 @@ function mergeWorkerMain() {
     }
     if (hasVulns && pluginList.length) {
       add({ v: 'Top 10 vulnerabilities', s: ST.section });
-      add({ v: 'Name', s: ST.header }, { v: 'Plugin ID', s: ST.header }, { v: 'Severity', s: ST.header }, { v: 'Hosts', s: ST.header });
+      add({ v: 'Name', s: ST.header }, { v: 'Plugin ID', s: ST.header }, { v: 'Severity', s: ST.header }, { v: T.Many, s: ST.header });
       for (const [id, p] of pluginList.slice(0, 10)) {
         add(p.name || id, asNumber(id), { v: SEVERITIES[p.sev][0], s: SEVERITIES[p.sev][1] }, p.hosts);
       }
@@ -1513,6 +1526,7 @@ function mergeWorkerMain() {
       const head = ['Host'];
       const widths = [22];
       if (anyIp) { head.push('IP Address'); widths.push(16); }
+      if (showReport) { head.push('Report'); widths.push(40); }
       if (anyFqdn) { head.push('FQDN'); widths.push(30); }
       if (anyOs) { head.push('OS'); widths.push(34); }
       if (hasVulns) { head.push('Critical', 'High', 'Medium', 'Low', 'Info', 'Total'); widths.push(10, 10, 10, 10, 10, 10); }
@@ -1520,23 +1534,24 @@ function mergeWorkerMain() {
       const showAuth = agg.authTotal > 0;
       if (showAuth) { head.push('Auth Failed'); widths.push(12); }
       const hostRows = [head.map(v => ({ v, s: ST.header }))];
-      for (const [name, h] of hostList.slice(0, XLSX_MAX_ROWS)) {
-        const cells = [name];
+      for (const [key, h] of hostList.slice(0, XLSX_MAX_ROWS)) {
+        const cells = [h.host];
         if (anyIp) cells.push(h.ip);
+        if (showReport) cells.push(h.report);
         if (anyFqdn) cells.push(h.fqdn);
         if (anyOs) cells.push(h.os);
         if (hasVulns) cells.push(...h.sev.slice(0, 5), h.sev.reduce((a, b) => a + b, 0));
         if (hasComp) cells.push(...h.comp, h.comp.some(Boolean) ? { v: passRate(h.comp), s: ST.pct } : null);
-        if (showAuth) cells.push(agg.authHosts.has(name) ? { v: 'Yes', s: ST.failed } : null);
+        if (showAuth) cells.push(agg.authHosts.has(key) ? { v: 'Yes', s: ST.failed } : null);
         hostRows.push(cells);
       }
-      sheets.push({ name: 'Hosts', widths, rows: hostRows, freeze: true, filter: `A1:${colLetter(head.length - 1)}${hostRows.length}` });
+      sheets.push({ name: T.Many, widths, rows: hostRows, freeze: true, filter: `A1:${colLetter(head.length - 1)}${hostRows.length}` });
     }
 
     // --- Vulnerabilities
     if (hasVulns && pluginList.length) {
       const anyFamily = pluginList.some(([, p]) => p.family);
-      const head = ['Plugin ID', 'Name', ...(anyFamily ? ['Plugin Family'] : []), 'Severity', 'Hosts Affected', 'Occurrences', 'CVEs'];
+      const head = ['Plugin ID', 'Name', ...(anyFamily ? ['Plugin Family'] : []), 'Severity', `${T.Many} Affected`, 'Occurrences', 'CVEs'];
       const vulnRows = [head.map(v => ({ v, s: ST.header }))];
       for (const [id, p] of pluginList.slice(0, XLSX_MAX_ROWS)) {
         vulnRows.push([asNumber(id), p.name, ...(anyFamily ? [p.family] : []),
@@ -1617,6 +1632,10 @@ function mergeWorkerMain() {
     }
     const withSummary = options.format === 'xlsx' && options.summary !== false;
     const complianceMode = options.mode === 'compliance';
+    // What makes two rows belong to the same target: the host name, host + IP
+    // (Oracle RAC nodes sharing a name), or host + report (one database per
+    // report). Used for duplicate removal and every per-target summary.
+    const identity = ['hostip', 'report'].includes(options.identity) ? options.identity : 'host';
     const authIds = new Set((options.authPlugins || []).map(v => String(v).trim()).filter(Boolean));
     const out = options.format === 'xlsx' ? new XlsxOutput(sink, outCols, withSummary) : new CsvOutput(sink, outCols, options.bom);
 
@@ -1658,6 +1677,15 @@ function mergeWorkerMain() {
         };
 
         const cell = (row, k) => (fKey[k] === -1 ? '' : (row[fKey[k]] || '').trim());
+        const targetKey = row => {
+          const host = cell(row, 'host');
+          if (identity === 'hostip') return host + '\x1f' + cell(row, 'ip');
+          if (identity === 'report') return host + '\x1f' + fi;
+          return host;
+        };
+        const targetInfo = row => ({
+          host: cell(row, 'host'), ip: cell(row, 'ip'), fqdn: cell(row, 'fqdn'), os: cell(row, 'os'), report: src.name,
+        });
 
         const handleRow = row => {
           stats.rowsIn++;
@@ -1684,7 +1712,7 @@ function mergeWorkerMain() {
           if (isAuth) {
             if (ruleMatch()) return;
             agg.addAuth({
-              host: cell(row, 'host'), ip: cell(row, 'ip'), fqdn: cell(row, 'fqdn'), os: cell(row, 'os'),
+              ...targetInfo(row), key: cell(row, 'host') ? targetKey(row) : '',
               plugin: cell(row, 'plugin'), name: cell(row, 'name'), protocol: cell(row, 'protocol'),
               port: cell(row, 'port'), output: cell(row, 'output'), source: src.name,
             });
@@ -1708,10 +1736,11 @@ function mergeWorkerMain() {
               // Compliance checks share one plugin ID per audit, so the check
               // name is part of what makes a finding distinct.
               const g = k => cell(row, k).toLowerCase();
-              key = g('plugin') + '\x1f' + g('host') + '\x1f' + g('protocol') + '\x1f' + g('port') + '\x1f' + g('cve') + '\x1f' + g('check');
+              key = g('plugin') + '\x1f' + targetKey(row).toLowerCase() + '\x1f' + g('protocol') + '\x1f' + g('port') + '\x1f' + g('cve') + '\x1f' + g('check');
             } else {
-              // Exact duplicate: compare the whole source row.
-              key = row.join('\x1f');
+              // Exact duplicate: compare the whole source row (within the
+              // report only, when each report is its own target).
+              key = (identity === 'report' ? fi + '\x1e' : '') + row.join('\x1f');
             }
             const [a, b] = hash64(key);
             if (!seen.add(a, b)) { stats.duplicates++; return; }
@@ -1730,8 +1759,8 @@ function mergeWorkerMain() {
             stats.sheetLast = out.currentSheet;
           }
 
-          const hostName = cell(row, 'host');
-          const h = hostName ? agg.host(hostName, cell(row, 'ip'), cell(row, 'fqdn'), cell(row, 'os')) : null;
+          const hostName = cell(row, 'host') ? targetKey(row) : '';
+          const h = hostName ? agg.host(hostName, targetInfo(row)) : null;
           if (isAuth) {
             // Counted in the auth section only.
           } else if (compBucket !== -1) {
@@ -1826,6 +1855,7 @@ function mergeWorkerMain() {
         duplicates: totals.duplicates,
         excluded: totals.filtered + totals.excluded,
         authPlugins: [...authIds],
+        identity,
         findingsSheets: out.sheetRows ? out.sheetRows.length : 1,
         sources,
         perFile,
@@ -1843,6 +1873,7 @@ function mergeWorkerMain() {
           uniqueHosts: agg.hosts.size,
           severity,
           compliance: agg.comp.slice(),
+          identity,
           authHosts: authIds.size ? agg.authTotal : null,
           perFile,
           ruleHits,
