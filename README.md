@@ -28,7 +28,7 @@ The choice is remembered in your browser.
 
 ### Authentication failures
 
-Rows from the plugin IDs in **Authentication failures** (default `104410`, *Target Credential Status by Authentication Protocol - Failure for Provided Credentials*) are reported separately: a dashboard section with the number of affected hosts and a table of protocol / port / user / error parsed from the plugin output, an **Auth Failures** sheet, and an *Auth Failed* column on the Hosts sheet. They are never counted as compliance checks or vulnerabilities, and they stay in the findings even when informational findings are excluded (an explicit exclusion rule still removes them). Add more IDs (e.g. `21745`) comma-separated, or clear the field to turn this off.
+Rows from the plugin IDs in **Authentication failures** (default `104410`, *Target Credential Status by Authentication Protocol - Failure for Provided Credentials*) are reported separately: a dashboard section with the number of affected hosts and a table of protocol / port / user / error parsed from the plugin output, an **Auth Failures** sheet, and an *Auth Failed* column on the Hosts sheet. They are never counted as compliance checks or vulnerabilities and, in the Excel workbook, appear only on the Auth Failures sheet, not in Findings (CSV output keeps them, as it has no separate sheet). An explicit exclusion rule still removes them entirely. Add more IDs (e.g. `21745`) comma-separated, or clear the field to turn this off.
 - **`.csv` exports** from Nessus / Tenable.
 
 Inputs can be mixed freely; the output contains the union of all columns.
@@ -44,10 +44,10 @@ Inputs can be mixed freely; the output contains the union of all columns.
   | **Vulnerabilities** | Per plugin: severity, hosts affected, occurrences, CVEs |
   | **Compliance** | Per check: Passed / Failed / Warning counts and pass rate (when compliance results exist) |
   | **Auth Failures** | Hosts where Tenable could not log in (plugin 104410 by default): IP, FQDN, OS, auth protocol, port, user, domain, error, full plugin output, source report |
-  | **Sources** | Per report: rows read / written, duplicates, exclusions, errors |
+  | **Sources** | Per report: rows read / written, which Findings sheet holds its rows, duplicates, exclusions, auth failures, errors |
   | **Findings** | The merged rows |
 
-  The summary sheets can be switched off. Findings have a bold, frozen header row with filters and numbers stored as numbers. Results larger than Excel's 1,048,576-row limit continue on extra sheets. Cells over Excel's 32,767-character limit are cut short and marked `[truncated]` (use CSV to keep full text).
+  The summary sheets can be switched off. Findings have a bold, frozen header row with filters and numbers stored as numbers. Results larger than Excel's 1,048,576-row limit (or a single sheet's 4 GB size limit) continue on extra sheets named *Findings (2)*, *Findings (3)*, …; the Dashboard and Sources sheet say which sheet holds each report. Cells over Excel's 32,767-character limit are cut short and marked `[truncated]` (use CSV to keep full text).
 - **CSV** — optional UTF-8 BOM for Excel.
 - **Stream straight to disk** (Chrome/Edge) — output is written to the chosen file as it is produced. Other browsers get a regular download.
 

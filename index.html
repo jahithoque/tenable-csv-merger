@@ -326,7 +326,7 @@
         <label class="field inline-field">Plugin IDs to report separately
           <input type="text" id="opt-auth" value="104410" spellcheck="false" placeholder="e.g. 104410, 21745">
         </label>
-        <p class="mode-help">Hosts where Tenable could not log in with the provided credentials get their own dashboard section and an "Auth Failures" sheet (protocol, port, user, error). These rows are never counted as compliance checks or vulnerabilities, and are kept even when informational findings are excluded. Leave empty to turn off.</p>
+        <p class="mode-help">Hosts where Tenable could not log in with the provided credentials get their own dashboard section and an "Auth Failures" sheet (protocol, port, user, error). These rows are never counted as compliance checks or vulnerabilities, and in the Excel workbook they appear only on the Auth Failures sheet, not in Findings. Leave empty to turn off.</p>
       </fieldset>
 
       <div class="options-grid">

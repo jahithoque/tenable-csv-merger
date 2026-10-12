@@ -948,7 +948,7 @@ function mergeWorkerMain() {
   const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
   const XLSX_MAX_ROWS = 1048575;        // data rows per sheet, plus the header row
   const XLSX_MAX_CELL = 32767;          // Excel's per-cell character limit
-  const XLSX_SHEET_CHARS = 1.2e9;       // keeps each sheet's XML well under 4 GB
+  const XLSX_SHEET_BYTES = 4.0e9;       // a sheet's XML must stay under the 4 GB ZIP entry limit
   const BAD_XML_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F￾￿]/g;
   const XML_SPECIAL = /[&<>\x00-\x08\x0B\x0C\x0E-\x1F￾￿]/;
   const NUMERIC = /^-?(?:0|[1-9]\d{0,14})(?:\.\d{1,10})?$/;
@@ -961,6 +961,18 @@ function mergeWorkerMain() {
     'synopsis': 45, 'description': 60, 'solution': 45, 'see also': 35, 'plugin output': 60,
     'ip address': 15, 'fqdn': 28, 'os': 30, 'source file': 30, 'plugin family': 22, 'scan name': 24,
   };
+
+  // UTF-8 byte length without encoding (surrogate pairs: 2 units -> 4 bytes).
+  function utf8Length(s) {
+    let n = s.length;
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      if (c > 0x7f) n += c <= 0x7ff || (c >= 0xd800 && c <= 0xdfff) ? 1 : 2;
+    }
+    return n;
+  }
+
+  const findingsSheetName = i => (i === 0 ? 'Findings' : `Findings (${i + 1})`);
 
   function colLetter(i) {
     let s = '';
@@ -1086,7 +1098,7 @@ function mergeWorkerMain() {
       this.pending = '';
       this.pendingLen = 0;
       this.sheetRows = [0];     // data rows per findings sheet
-      this.sheetChars = 0;
+      this.sheetBytes = 0;
       this.stream = null;
       this.truncated = 0;
     }
@@ -1107,24 +1119,34 @@ function mergeWorkerMain() {
       return xml + '</row>';
     }
 
+    // A new sheet starts only at Excel's row limit or when this sheet's XML
+    // would pass the 4 GB ZIP entry limit.
     row(values) {
-      const n = this.sheetRows.length - 1;
-      if (this.sheetRows[n] >= XLSX_MAX_ROWS || this.sheetChars >= XLSX_SHEET_CHARS) {
+      let n = this.sheetRows.length - 1;
+      const truncatedBefore = this.truncated;
+      let xml = this.rowXml(values, this.sheetRows[n] + 2, 0);
+      let bytes = utf8Length(xml);
+      if (this.sheetRows[n] >= XLSX_MAX_ROWS || this.sheetBytes + bytes > XLSX_SHEET_BYTES) {
         this.queue.push(this.pending, NEW_SHEET);
         this.pending = '';
         this.sheetRows.push(0);
-        this.sheetChars = 0;
+        this.sheetBytes = 0;
+        n++;
+        this.truncated = truncatedBefore;
+        xml = this.rowXml(values, 2, 0); // row numbers restart on the new sheet
+        bytes = utf8Length(xml);
       }
-      const sheet = this.sheetRows.length - 1;
-      const xml = this.rowXml(values, ++this.sheetRows[sheet] + 1, 0);
+      this.sheetRows[n]++;
       this.pending += xml;
       this.pendingLen += xml.length;
-      this.sheetChars += xml.length;
+      this.sheetBytes += bytes;
     }
+
+    get currentSheet() { return this.sheetRows.length - 1; }
 
     get needsFlush() { return this.pendingLen >= FLUSH_SIZE || this.sink.needsFlush; }
 
-    sheetName(i) { return i === 0 ? 'Findings' : `Findings (${i + 1})`; }
+    sheetName(i) { return findingsSheetName(i); }
 
     sheetHead({ widths, freeze, selected }) {
       const cols = widths.map((w, j) => `<col min="${j + 1}" max="${j + 1}" width="${w}" customWidth="1"/>`).join('');
@@ -1387,6 +1409,10 @@ function mergeWorkerMain() {
     }
     add('Duplicates removed', meta.duplicates);
     add('Rows excluded (informational / rules)', meta.excluded);
+    if (meta.findingsSheets > 1) {
+      add({ v: 'Findings sheets', s: ST.bold }, { v: meta.findingsSheets, s: ST.bold });
+      add({ v: `Findings continue across ${meta.findingsSheets} sheets (Findings to ${findingsSheetName(meta.findingsSheets - 1)}). Excel allows at most 1,048,576 rows per sheet; the Sources sheet shows which sheet holds each report.`, s: ST.note });
+    }
     blank();
 
     const authList = agg.auth.slice().sort((x, y) => collator.compare(x.host, y.host) || collator.compare(x.port, y.port));
@@ -1552,14 +1578,17 @@ function mergeWorkerMain() {
     }
 
     // --- Sources
-    const srcHead = ['Report', 'Type', 'Rows read', 'Rows written', 'Duplicates removed', 'Info excluded', 'Removed by rules', 'Status'];
+    const srcHead = ['Report', 'Type', 'Rows read', 'Rows written', 'Findings sheet', 'Duplicates removed', 'Info excluded', 'Removed by rules', 'Auth failures', 'Status'];
     const srcRows = [srcHead.map(v => ({ v, s: ST.header }))];
     meta.sources.forEach((src, i) => {
       const st = meta.perFile[i] || {};
-      srcRows.push([src.name, src.kind === 'nessus' ? '.nessus' : 'CSV', st.rowsIn || 0, st.rowsOut || 0,
-        st.duplicates || 0, st.filtered || 0, st.excluded || 0, st.error ? `Error: ${st.error}` : 'OK']);
+      const where = st.sheetFirst === null || st.sheetFirst === undefined ? '—'
+        : findingsSheetName(st.sheetFirst) + (st.sheetLast > st.sheetFirst ? ` to ${findingsSheetName(st.sheetLast)}` : '');
+      srcRows.push([src.name, src.kind === 'nessus' ? '.nessus' : 'CSV', st.rowsIn || 0, st.rowsOut || 0, where,
+        st.duplicates || 0, st.filtered || 0, st.excluded || 0, st.auth || 0,
+        st.error ? `Error: ${st.error}` : st.rowsIn && !st.rowsOut ? 'OK (no rows left after filters)' : 'OK']);
     });
-    sheets.push({ name: 'Sources', widths: [60, 9, 12, 13, 18, 13, 16, 30], rows: srcRows, freeze: true, filter: `A1:H${srcRows.length}` });
+    sheets.push({ name: 'Sources', widths: [60, 9, 12, 13, 26, 18, 13, 16, 13, 30], rows: srcRows, freeze: true, filter: `A1:J${srcRows.length}` });
 
     return { sheets };
   }
@@ -1597,7 +1626,7 @@ function mergeWorkerMain() {
     const seen = options.dedupe === 'none' ? null : new HashSet64();
     const agg = new SummaryCollector();
     const severity = Object.create(null); // vulnerability rows by Risk label, for the page
-    const totals = { rowsIn: 0, rowsOut: 0, duplicates: 0, filtered: 0, excluded: 0, malformed: 0 };
+    const totals = { rowsIn: 0, rowsOut: 0, duplicates: 0, filtered: 0, excluded: 0, auth: 0, malformed: 0 };
     const rules = compileRules(options.rules);
     const ruleHits = rules.map(() => 0);
     const perFile = [];
@@ -1607,7 +1636,7 @@ function mergeWorkerMain() {
       for (let fi = 0; fi < sources.length; fi++) {
         if (cancelled) break;
         const src = sources[fi];
-        const stats = { rowsIn: 0, rowsOut: 0, duplicates: 0, filtered: 0, excluded: 0, malformed: 0, error: null };
+        const stats = { rowsIn: 0, rowsOut: 0, duplicates: 0, filtered: 0, excluded: 0, auth: 0, malformed: 0, error: null, sheetFirst: null, sheetLast: null };
         let map = null;        // source column index -> output column index (or -1)
         let fileCols = 0;
         // Key columns come from the source itself so dedupe/filter still work
@@ -1647,9 +1676,10 @@ function mergeWorkerMain() {
           };
 
           // Authentication-failure plugins are reported on their own (dashboard
-          // + "Auth Failures" sheet), stay in the findings even when
-          // informational rows are excluded, and never count as compliance
-          // checks or vulnerabilities. Explicit exclusion rules still apply.
+          // + "Auth Failures" sheet) and never count as compliance checks or
+          // vulnerabilities. With the summary sheets on they are left out of
+          // Findings; otherwise (e.g. CSV) they stay so nothing is lost.
+          // Explicit exclusion rules still apply.
           const isAuth = authIds.has(cell(row, 'plugin'));
           if (isAuth) {
             if (ruleMatch()) return;
@@ -1658,6 +1688,7 @@ function mergeWorkerMain() {
               plugin: cell(row, 'plugin'), name: cell(row, 'name'), protocol: cell(row, 'protocol'),
               port: cell(row, 'port'), output: cell(row, 'output'), source: src.name,
             });
+            if (withSummary) { stats.auth++; return; }
           }
 
           // Compliance results are never "informational": a PASSED check has
@@ -1694,6 +1725,10 @@ function mergeWorkerMain() {
           if (sourceIdx !== -1) values[sourceIdx] = src.name;
           out.row(values);
           stats.rowsOut++;
+          if (out.currentSheet !== undefined) {
+            if (stats.sheetFirst === null) stats.sheetFirst = out.currentSheet;
+            stats.sheetLast = out.currentSheet;
+          }
 
           const hostName = cell(row, 'host');
           const h = hostName ? agg.host(hostName, cell(row, 'ip'), cell(row, 'fqdn'), cell(row, 'os')) : null;
@@ -1791,6 +1826,7 @@ function mergeWorkerMain() {
         duplicates: totals.duplicates,
         excluded: totals.filtered + totals.excluded,
         authPlugins: [...authIds],
+        findingsSheets: out.sheetRows ? out.sheetRows.length : 1,
         sources,
         perFile,
       }) : null;

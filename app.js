@@ -850,7 +850,10 @@
     }
 
     if (stats.format === 'xlsx' && stats.sheets > 1) {
-      notice(el.resultNotices, `${fmtNum(stats.rowsOut)} rows is more than one Excel sheet can hold, so the workbook has ${stats.sheets} sheets ("Findings", "Findings (2)", …), each with its own header row.`);
+      notice(el.resultNotices, `The findings continue across ${stats.sheets} sheets ("Findings", "Findings (2)", …), each with its own header row, because Excel allows at most 1,048,576 rows per sheet. The Sources sheet shows which sheet holds each report's rows.`);
+    }
+    if (stats.auth) {
+      notice(el.resultNotices, `${fmtNum(stats.auth)} authentication-failure row${stats.auth > 1 ? 's were' : ' was'} moved out of Findings to the "Auth Failures" sheet.`);
     }
     if (stats.truncatedCells) {
       notice(el.resultNotices, `${fmtNum(stats.truncatedCells)} cell${stats.truncatedCells > 1 ? 's were' : ' was'} longer than Excel's 32,767-character limit and ${stats.truncatedCells > 1 ? 'were' : 'was'} cut short (marked "[truncated]"). Choose CSV output to keep the full text.`);
