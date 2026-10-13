@@ -52,9 +52,10 @@ Inputs can be mixed freely; the output contains the union of all columns.
   | Sheet | Contents |
   | --- | --- |
   | **Dashboard** | Overview, vulnerabilities by severity (with hosts affected), compliance results and **compliance score**, top 10 riskiest hosts, top 10 vulnerabilities, top 10 failed checks, plus a severity bar chart and compliance doughnut chart (native Excel charts) |
-  | **Hosts** | Per host: IP / FQDN / OS, Critical–Info counts, Passed / Failed / Warning checks and pass rate |
+  | **Hosts / Targets** | Per host or target: IP / FQDN / OS, Critical–Info counts, Passed / Failed / Warning checks, pass rate, and a Status (Results / Auth failed / No usable results) |
   | **Vulnerabilities** | Per plugin: severity, hosts affected, occurrences, CVEs |
   | **Compliance** | Per check: Passed / Failed / Warning counts and pass rate (when compliance results exist) |
+  | **No Results** | Targets that were scanned but returned only excluded or informational rows (e.g. only the SYN/TCP port scanners 11219 / 10335 or scan information 19506): plugins received, ports seen, reason. These rows never appear in Findings |
   | **Auth Failures** | Hosts where Tenable could not log in (plugin 104410 by default): IP, FQDN, OS, auth protocol, port, user, domain, error, full plugin output, source report |
   | **Sources** | Per report: rows read / written, which Findings sheet holds its rows, duplicates, exclusions, auth failures, errors |
   | **Findings** | The merged rows |

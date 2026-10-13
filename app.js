@@ -4,7 +4,7 @@
 
   // Shown in the page header and stamped on every workbook's dashboard, so a
   // report can be traced to the build that produced it.
-  const APP_VERSION = '2026.10.12-3';
+  const APP_VERSION = '2026.10.13-1';
   const EXCEL_MAX_ROWS = 1048575; // 1,048,576 minus the header row
   const SEVERITY_ORDER = [
     ['critical', 'Critical', 'var(--sev-critical)'],
@@ -834,6 +834,7 @@
       [fmtNum(stats.uniqueHosts), stats.identity === 'host' ? 'Unique hosts' : 'Targets'],
       ...(compTotal(stats) ? [[`${(passRate(stats.compliance) * 100).toFixed(1)}%`, 'Compliance pass rate']] : []),
       ...(stats.authHosts != null ? [[fmtNum(stats.authHosts), `${stats.identity === 'host' ? 'Hosts' : 'Targets'} with failed authentication`]] : []),
+      [fmtNum(stats.noResults || 0), `${stats.identity === 'host' ? 'Hosts' : 'Targets'} with no usable results`],
       [fmtNum(stats.columns), 'Columns'],
       [fmtBytes(stats.bytesOut), 'Output size'],
       [fmtDuration(elapsed), 'Time taken'],
@@ -874,6 +875,9 @@
 
     if (stats.format === 'xlsx' && stats.sheets > 1) {
       notice(el.resultNotices, `The findings continue across ${stats.sheets} sheets ("Findings", "Findings (2)", \u2026), each with its own header row, because Excel allows at most 1,048,576 rows per sheet. The Sources sheet shows which sheet holds each report's rows.`);
+    }
+    if (stats.noResults) {
+      notice(el.resultNotices, `${fmtNum(stats.noResults)} scanned ${stats.identity === 'host' ? 'host' : 'target'}${stats.noResults > 1 ? 's' : ''} returned only excluded or informational rows (e.g. port-scanner plugins). They are listed on the Dashboard and the "No Results" sheet, not in Findings.`);
     }
     if (stats.auth) {
       notice(el.resultNotices, `${fmtNum(stats.auth)} authentication-failure row${stats.auth > 1 ? 's were' : ' was'} moved out of Findings to the "Auth Failures" sheet.`);

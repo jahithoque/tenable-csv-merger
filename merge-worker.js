@@ -8,7 +8,7 @@ function mergeWorkerMain() {
   'use strict';
 
   // Must match APP_VERSION in app.js; the page warns when files are mixed.
-  const WORKER_VERSION = '2026.10.12-3';
+  const WORKER_VERSION = '2026.10.13-1';
 
   const READ_CHUNK = 4 * 1024 * 1024;        // bytes per file read
   const PROBE_CHUNK = 256 * 1024;            // bytes per read when sniffing headers
@@ -1396,7 +1396,37 @@ function mergeWorkerMain() {
       this.auth = [];               // one entry per distinct failed-login finding
       this.authSeen = new HashSet64();
       this.authHosts = new Set();
+      // Every target that sent any row, before exclusion rules, so targets
+      // whose rows were all excluded (e.g. only port-scanner plugins) can
+      // still be reported as scanned.
+      this.seen = new Map();        // target key -> { host, ip, ..., rows, plugins, ports, excluded, filtered }
     }
+
+    see(key, info, plugin, name, port) {
+      let t = this.seen.get(key);
+      if (!t) {
+        t = { host: info.host, ip: '', fqdn: '', os: '', report: info.report, rows: 0,
+          plugins: new Map(), ports: new Set(), excluded: 0, filtered: 0 };
+        this.seen.set(key, t);
+      }
+      t.rows++;
+      if (!t.ip && info.ip) t.ip = info.ip;
+      if (!t.fqdn && info.fqdn) t.fqdn = info.fqdn;
+      if (!t.os && info.os) t.os = info.os;
+      if (plugin && t.plugins.size < 25 && !t.plugins.has(plugin)) t.plugins.set(plugin, name);
+      if (port && port !== '0' && t.ports.size < 50) t.ports.add(port);
+      return t;
+    }
+
+    // A target is productive when it contributed a compliance result, a
+    // vulnerability finding or an authentication failure.
+    productive(key) {
+      if (this.authHosts.has(key)) return true;
+      const h = this.hosts.get(key);
+      return !!h && (h.sev.some(Boolean) || h.comp.some(Boolean));
+    }
+
+    get noResults() { return [...this.seen].filter(([key]) => !this.productive(key)); }
 
     // a.key is the target key (see targetKey in merge), so failures of two
     // databases on one host are kept apart when targets include the report.
@@ -1483,6 +1513,18 @@ function mergeWorkerMain() {
     const sevRows = SEVERITIES.filter((s, i) => i < 5 || agg.sev[5] > 0);
     const compScore = passRate(agg.comp);
 
+    // Targets that were scanned but produced nothing usable.
+    const reasonOf = t => (t.excluded && t.filtered ? 'Only excluded or informational rows'
+      : t.excluded ? 'All rows removed by exclusion rules'
+        : t.filtered ? 'Only informational rows' : 'No usable rows');
+    const pluginsOf = t => [...t.plugins].map(([id, name]) => (name ? `${id} ${name}` : id)).join(', ');
+    const noResultList = agg.noResults.map(([key, t]) => ({ key, ...t, reason: reasonOf(t) }))
+      .sort((x, y) => collator.compare(x.host, y.host) || collator.compare(x.ip, y.ip) || collator.compare(x.report, y.report));
+    const noResultKeys = new Set(noResultList.map(t => t.key));
+    for (const t of noResultList) agg.host(t.key, t); // so they appear on the Targets sheet
+    const statusOf = key => (agg.authHosts.has(key) ? { v: 'Auth failed', s: ST.failed }
+      : noResultKeys.has(key) ? { v: 'No usable results', s: ST.warning } : { v: 'Results', s: ST.tdNum });
+
     const hostList = [...agg.hosts].sort((x, y) => {
       const a = x[1], b = y[1];
       for (let i = 0; i < 4; i++) if (a.sev[i] !== b.sev[i]) return b.sev[i] - a.sev[i];
@@ -1540,7 +1582,7 @@ function mergeWorkerMain() {
     blank(10);
 
     // KPI tiles: 4 per row (2 columns each); a short last row is centred.
-    const kpis = [['Reports merged', meta.reports, ST.kpiValue], [T.Many, agg.hosts.size, ST.kpiValue]];
+    const kpis = [['Reports merged', meta.reports, ST.kpiValue], [`${T.Many} scanned`, agg.hosts.size, ST.kpiValue]];
     if (hasComp) {
       kpis.push(['Compliance score', compScore, ST.kpiPct],
         ['Failed checks', agg.comp[1], agg.comp[1] ? ST.kpiBad : ST.kpiGood],
@@ -1553,6 +1595,7 @@ function mergeWorkerMain() {
     if (meta.authPlugins.length) {
       kpis.push([`${T.Many} with failed authentication`, agg.authTotal, agg.authTotal ? ST.kpiBad : ST.kpiGood]);
     }
+    kpis.push([`${T.Many} with no usable results`, noResultList.length, noResultList.length ? ST.kpiBad : ST.kpiGood]);
     kpis.push(['Duplicates removed', meta.duplicates, ST.kpiValue], ['Rows excluded (info / rules)', meta.excluded, ST.kpiValue]);
     for (let i = 0; i < kpis.length; i += 4) {
       const group = kpis.slice(i, i + 4);
@@ -1656,6 +1699,31 @@ function mergeWorkerMain() {
       blank(10);
     }
 
+    full(`Scanned ${T.many} with no usable results`, ST.section, 24);
+    if (!noResultList.length) {
+      line([{ v: `Every scanned ${T.one} returned usable results.`, s: ST.passed, span: GRID }], 20);
+    } else {
+      full(`${noResultList.length} ${noResultList.length === 1 ? T.one : T.many} responded to the scan, but every row ` +
+        'they returned was excluded or informational (e.g. only port-scanner or scan-information plugins), so there are ' +
+        'no compliance or vulnerability results for them. Check the port, service or credentials used for these scans.', ST.note);
+      const cols = showReport
+        ? [['Host', 1], ['IP Address', 1], ['Report', 2], ['Plugins received', 3], ['Ports seen', 1]]
+        : [['Host', 2], ['IP Address', 1], ['Plugins received', 4], ['Ports seen', 1]];
+      head(cols);
+      const NO_RESULTS_ON_DASHBOARD = 25;
+      for (const t of noResultList.slice(0, NO_RESULTS_ON_DASHBOARD)) {
+        const vals = {
+          'Host': { v: t.host, s: ST.tdBold }, 'IP Address': { v: t.ip, s: ST.tdNum }, 'Report': { v: t.report, s: ST.td },
+          'Plugins received': { v: pluginsOf(t), s: ST.td }, 'Ports seen': { v: [...t.ports].join(', '), s: ST.tdNum },
+        };
+        line(cols.map(([name, span]) => ({ ...vals[name], span })));
+      }
+      if (noResultList.length > NO_RESULTS_ON_DASHBOARD) {
+        full(`... and ${noResultList.length - NO_RESULTS_ON_DASHBOARD} more. See the "No Results" sheet.`, ST.note);
+      }
+    }
+    blank(10);
+
     if (hostList.length) {
       full(`Top 10 ${T.many} by risk`, ST.section, 24);
       const name = byHost ? 'Host' : 'Target';
@@ -1666,7 +1734,8 @@ function mergeWorkerMain() {
       } else {
         head([[name, 4], ['Failed', 1], ['Warning / Manual', 1], ['Passed', 1], ['Pass rate', 1]]);
       }
-      for (const [, h] of hostList.slice(0, 10)) {
+      // Targets without results have their own sections; rank only the rest.
+      for (const [, h] of hostList.filter(([, t]) => t.sev.some(Boolean) || t.comp.some(Boolean)).slice(0, 10)) {
         const rate = h.comp.some(Boolean) ? { v: passRate(h.comp), s: ST.tdPct } : { v: '', s: ST.tdNum };
         const num = v => ({ v, s: ST.tdNum });
         if (hasVulns && hasComp) {
@@ -1714,8 +1783,7 @@ function mergeWorkerMain() {
       if (anyOs) { head.push('OS'); widths.push(34); }
       if (hasVulns) { head.push('Critical', 'High', 'Medium', 'Low', 'Info', 'Total'); widths.push(10, 10, 10, 10, 10, 10); }
       if (hasComp) { head.push('Passed', 'Failed', 'Warning / Manual', 'Error / other', 'Pass rate'); widths.push(10, 10, 17, 13, 11); }
-      const showAuth = agg.authTotal > 0;
-      if (showAuth) { head.push('Auth Failed'); widths.push(12); }
+      head.push('Status'); widths.push(18);
       const hostRows = [head.map(v => ({ v, s: ST.header }))];
       for (const [key, h] of hostList.slice(0, XLSX_MAX_ROWS)) {
         const cells = [h.host];
@@ -1725,7 +1793,7 @@ function mergeWorkerMain() {
         if (anyOs) cells.push(h.os);
         if (hasVulns) cells.push(...h.sev.slice(0, 5), h.sev.reduce((a, b) => a + b, 0));
         if (hasComp) cells.push(...h.comp, h.comp.some(Boolean) ? { v: passRate(h.comp), s: ST.pct } : null);
-        if (showAuth) cells.push(agg.authHosts.has(key) ? { v: 'Yes', s: ST.failed } : null);
+        cells.push(statusOf(key));
         hostRows.push(tableCells(cells));
       }
       sheets.push({ name: T.Many, widths, rows: hostRows, freeze: true, autoHeight: true, heights: { 0: 24 }, filter: `A1:${colLetter(head.length - 1)}${hostRows.length}` });
@@ -1758,6 +1826,19 @@ function mergeWorkerMain() {
       sheets.push({
         name: 'Compliance', widths: [80, ...(anyAudit ? [30] : []), 10, 10, 17, 13, 10, 11], rows: compRows, autoHeight: true, heights: { 0: 24 },
         freeze: true, filter: `A1:${colLetter(head.length - 1)}${compRows.length}`,
+      });
+    }
+
+    // --- No Results
+    if (noResultList.length) {
+      const head = ['Host', 'IP Address', 'FQDN', 'OS', 'Report', 'Rows received', 'Plugins received', 'Ports seen', 'Reason'];
+      const nrRows = [head.map(v => ({ v, s: ST.header }))];
+      for (const t of noResultList) {
+        nrRows.push(tableCells([t.host, t.ip, t.fqdn, t.os, t.report, t.rows, pluginsOf(t), [...t.ports].join(', '), t.reason]));
+      }
+      sheets.push({
+        name: 'No Results', widths: [24, 16, 28, 28, 40, 14, 60, 20, 36], rows: nrRows,
+        freeze: true, autoHeight: true, heights: { 0: 24 }, filter: `A1:I${nrRows.length}`,
       });
     }
 
@@ -1887,6 +1968,9 @@ function mergeWorkerMain() {
         const handleRow = row => {
           stats.rowsIn++;
           if (row.length !== fileCols) stats.malformed++;
+          const seenRec = cell(row, 'host')
+            ? agg.see(targetKey(row), targetInfo(row), cell(row, 'plugin'), cell(row, 'name'), cell(row, 'port'))
+            : null;
 
           const ruleMatch = () => {
             for (let r = 0; r < fRules.length; r++) {
@@ -1894,6 +1978,7 @@ function mergeWorkerMain() {
               if (rule.test(row[rule.col] || '')) {
                 stats.excluded++;
                 ruleHits[rule.index]++;
+                if (seenRec) seenRec.excluded++;
                 return true;
               }
             }
@@ -1922,7 +2007,7 @@ function mergeWorkerMain() {
 
           if (options.excludeInfo && compBucket === -1 && !isAuth && fKey.risk !== -1) {
             const sev = (row[fKey.risk] || '').trim().toLowerCase();
-            if (INFO_LEVELS.has(sev)) { stats.filtered++; return; }
+            if (INFO_LEVELS.has(sev)) { stats.filtered++; if (seenRec) seenRec.filtered++; return; }
           }
 
           if (!isAuth && ruleMatch()) return;
@@ -2068,11 +2153,12 @@ function mergeWorkerMain() {
           ...extra,
           format: options.format,
           columns: outCols.length,
-          uniqueHosts: agg.hosts.size,
+          uniqueHosts: Math.max(agg.seen.size, agg.hosts.size),
           severity,
           compliance: agg.comp.slice(),
           identity,
           authHosts: authIds.size ? agg.authTotal : null,
+          noResults: agg.noResults.length,
           perFile,
           ruleHits,
           bytesIn: totalBytes,
