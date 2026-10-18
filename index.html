@@ -325,6 +325,15 @@
       </fieldset>
 
       <fieldset class="report-type">
+        <legend>Database scans</legend>
+        <div class="format" role="radiogroup" aria-label="Database scans">
+          <label><input type="radio" name="dbscan" value="none" checked><span>Not database scans</span></label>
+          <label><input type="radio" name="dbscan" value="oracle"><span>Oracle databases</span></label>
+        </div>
+        <p class="mode-help" id="dbscan-help"></p>
+      </fieldset>
+
+      <fieldset class="report-type">
         <legend>Target identity</legend>
         <div class="format" role="radiogroup" aria-label="Target identity">
           <label><input type="radio" name="identity" value="host" checked><span>Host name</span></label>

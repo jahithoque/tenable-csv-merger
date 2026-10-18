@@ -26,6 +26,17 @@ Works offline and straight from disk (`file://`).
 
 The choice is remembered in your browser.
 
+### Database scans (Oracle)
+
+Choose **Database scans → Oracle databases** when the reports are Oracle database compliance scans (one database per scan). The tool reads the database **SID** from each `.nessus` file's scan policy (*Database settings → Database SID*) and:
+
+- tags every row with it in a **Database** column,
+- treats each database (host + IP + SID) as its own target, so databases sharing a host, IP or port are never merged,
+- compares duplicates only within the same database (the same database reported twice is still de-duplicated),
+- replaces the Targets sheet with a **Databases** sheet and shows the SID in the report list, Sources sheet, No Results and Auth Failures.
+
+Only the database-identity preferences are read from the scan policy; logins and passwords in the same section are ignored and never written to the output. A report whose policy has no SID is kept separate per report.
+
 ### Target identity
 
 How rows are grouped into targets, for duplicate removal and every per-target count (Hosts/Targets sheet, top 10, pass rates, affected counts, authentication failures):
@@ -85,3 +96,11 @@ Inputs can be mixed freely; the output contains the union of all columns.
 | `index.html` | Page markup and styling (inlined so it works from local files on any OS) |
 | `app.js` | UI: file handling, options, progress, results |
 | `merge-worker.js` | Merge engine (runs in a Web Worker): ZIP reader, `.nessus` and CSV stream parsers, CSV and `.xlsx` writers |
+
+## Tests
+
+```
+node tests/run-tests.mjs
+```
+
+Self-contained regression tests for the merge engine (Node 20+, no other dependencies).

@@ -4,7 +4,7 @@
 
   // Shown in the page header and stamped on every workbook's dashboard, so a
   // report can be traced to the build that produced it.
-  const APP_VERSION = '2026.10.13-1';
+  const APP_VERSION = '2026.10.18-1';
   const EXCEL_MAX_ROWS = 1048575; // 1,048,576 minus the header row
   const SEVERITY_ORDER = [
     ['critical', 'Critical', 'var(--sev-critical)'],
@@ -25,7 +25,7 @@
     optDisk: $('opt-disk'), optDiskWrap: $('opt-disk-wrap'), optName: $('opt-name'),
     colCount: $('col-count'), colNote: $('col-note'), colChips: $('col-chips'), colSearch: $('col-search'),
     optSummary: $('opt-summary'), optSummaryWrap: $('opt-summary-wrap'), modeHelp: $('mode-help'), optAuth: $('opt-auth'),
-    identityHelp: $('identity-help'), optRowsWrap: $('opt-rows-wrap'),
+    identityHelp: $('identity-help'), optRowsWrap: $('opt-rows-wrap'), dbscanHelp: $('dbscan-help'),
     mergeBtn: $('merge-btn'), mergeHint: $('merge-hint'),
     progressCard: $('progress-card'), progressTitle: $('progress-title'), progressBar: $('progress-bar'),
     progressFill: $('progress-fill'), progressPct: $('progress-pct'), progressDetail: $('progress-detail'),
@@ -117,6 +117,7 @@
       entry.headers = m.headers;
       entry.recognized = m.recognized;
       entry.compliance = !!m.compliance;
+      entry.databases = m.databases || [];
       entry.derive = !!m.derive;
     }
     renderRow(entry);
@@ -138,7 +139,7 @@
         id: state.nextId++, file: zip.file, zipEntry: c.entry, kind: c.kind,
         name: `${zip.name} \u203A ${c.name}`, size: c.size, fp, merged: null,
         status: c.error ? 'error' : 'ready', error: c.error, headers: c.headers, recognized: c.recognized,
-        compliance: !!c.compliance, derive: !!c.derive,
+        compliance: !!c.compliance, derive: !!c.derive, databases: c.databases || [],
       });
     }
     const notes = [];
@@ -283,7 +284,13 @@
     else if (entry.status === 'error') { cls = 'err'; text = entry.error; }
     else if (entry.mergeError) { cls = 'err'; text = 'Failed: ' + entry.mergeError; }
     else if (!entry.recognized) { cls = 'warn'; text = 'No Plugin ID / Host column'; }
-    else { cls = 'ok'; text = 'Ready'; }
+    else if (dbScanMode() === 'oracle' && entry.kind === 'nessus') {
+      const sids = entry.databases || [];
+      cls = sids.length === 1 ? 'ok' : 'warn';
+      text = sids.length === 1 ? `Ready \u00b7 Oracle SID ${sids[0]}`
+        : sids.length ? `Ready \u00b7 several SIDs: ${sids.join(', ')}`
+          : 'Ready \u00b7 no SID in scan policy (kept separate per report)';
+    } else { cls = 'ok'; text = 'Ready'; }
     st.innerHTML = '';
     const span = document.createElement('span');
     span.className = 'status ' + cls;
@@ -352,6 +359,9 @@
         if (col) col.count++;
         else map.set(key, { name: h, key, count: 1 });
       }
+    }
+    if (dbScanMode() === 'oracle' && map.size && !map.has('database')) {
+      map.set('database', { name: 'Database', key: 'database', count: state.entries.filter(x => x.status === 'ready').length });
     }
     // In compliance-audit mode every report gets these, derived from Risk / Name if missing.
     if (reportMode() === 'compliance' && map.size) {
@@ -763,6 +773,7 @@
         mode: reportMode(),
         appVersion: APP_VERSION,
         identity: targetIdentity(),
+        dbMode: dbScanMode(),
         findingsRows: document.querySelector('input[name="rows"]:checked').value,
         authPlugins: authPluginIds(),
         bom: el.optBom.checked,
@@ -831,10 +842,10 @@
       [fmtNum(stats.duplicates), 'Duplicates removed'],
       [fmtNum(stats.filtered), 'Info rows excluded'],
       [fmtNum(stats.excluded), 'Removed by rules'],
-      [fmtNum(stats.uniqueHosts), stats.identity === 'host' ? 'Unique hosts' : 'Targets'],
+      [fmtNum(stats.uniqueHosts), stats.identity === 'host' ? 'Unique hosts' : unitOf(stats.identity)[0]],
       ...(compTotal(stats) ? [[`${(passRate(stats.compliance) * 100).toFixed(1)}%`, 'Compliance pass rate']] : []),
-      ...(stats.authHosts != null ? [[fmtNum(stats.authHosts), `${stats.identity === 'host' ? 'Hosts' : 'Targets'} with failed authentication`]] : []),
-      [fmtNum(stats.noResults || 0), `${stats.identity === 'host' ? 'Hosts' : 'Targets'} with no usable results`],
+      ...(stats.authHosts != null ? [[fmtNum(stats.authHosts), `${unitOf(stats.identity)[0]} with failed authentication`]] : []),
+      [fmtNum(stats.noResults || 0), `${unitOf(stats.identity)[0]} with no usable results`],
       [fmtNum(stats.columns), 'Columns'],
       [fmtBytes(stats.bytesOut), 'Output size'],
       [fmtDuration(elapsed), 'Time taken'],
@@ -877,7 +888,7 @@
       notice(el.resultNotices, `The findings continue across ${stats.sheets} sheets ("Findings", "Findings (2)", \u2026), each with its own header row, because Excel allows at most 1,048,576 rows per sheet. The Sources sheet shows which sheet holds each report's rows.`);
     }
     if (stats.noResults) {
-      notice(el.resultNotices, `${fmtNum(stats.noResults)} scanned ${stats.identity === 'host' ? 'host' : 'target'}${stats.noResults > 1 ? 's' : ''} returned only excluded or informational rows (e.g. port-scanner plugins). They are listed on the Dashboard and the "No Results" sheet, not in Findings.`);
+      notice(el.resultNotices, `${fmtNum(stats.noResults)} scanned ${unitOf(stats.identity)[1]}${stats.noResults > 1 ? 's' : ''} returned only excluded or informational rows (e.g. port-scanner plugins). They are listed on the Dashboard and the "No Results" sheet, not in Findings.`);
     }
     if (stats.auth) {
       notice(el.resultNotices, `${fmtNum(stats.auth)} authentication-failure row${stats.auth > 1 ? 's were' : ' was'} moved out of Findings to the "Auth Failures" sheet.`);
@@ -999,6 +1010,11 @@
     report: 'Each report is a separate target (e.g. one database per scan, even when several databases share a host). Duplicates are only removed within the same report; per-target counts never mix reports.',
   };
   const targetIdentity = () => document.querySelector('input[name="identity"]:checked').value;
+  function unitOf(identity) {
+    if (identity === 'host') return ['Hosts', 'host'];
+    if (identity === 'database') return ['Databases', 'database'];
+    return ['Targets', 'target'];
+  }
   try {
     const saved = localStorage.getItem(IDENTITY_STORAGE_KEY);
     const radio = saved && document.querySelector(`input[name="identity"][value="${CSS.escape(saved)}"]`);
@@ -1012,6 +1028,43 @@
       clearResult();
     });
   }
+
+  // Database scans: in Oracle mode each database (host + IP + SID from the
+  // scan policy) is its own target, overriding Target identity.
+  const DBSCAN_STORAGE_KEY = 'tenable-merger.dbscan.v1';
+  const DBSCAN_HELP = {
+    none: 'Rows are grouped by the Target identity below.',
+    oracle: 'Each .nessus file\u2019s scan policy names the database it scanned (Database SID). Every row is tagged with that SID in a ' +
+      'Database column, each database (host + IP + SID) is reported separately, and duplicates are only compared within the same ' +
+      'database. Target identity is set automatically.',
+  };
+  function dbScanMode() {
+    const r = document.querySelector('input[name="dbscan"]:checked');
+    return r ? r.value : 'none';
+  }
+  function syncDbScan() {
+    const oracle = dbScanMode() === 'oracle';
+    el.dbscanHelp.textContent = DBSCAN_HELP[dbScanMode()];
+    for (const r of document.querySelectorAll('input[name="identity"]')) r.disabled = oracle;
+    el.identityHelp.textContent = oracle
+      ? 'Set by Oracle databases: each database is host + IP + SID.'
+      : IDENTITY_HELP[targetIdentity()];
+    for (const entry of state.entries) renderRow(entry);
+  }
+  try {
+    const saved = localStorage.getItem(DBSCAN_STORAGE_KEY);
+    const radio = saved && document.querySelector(`input[name="dbscan"][value="${CSS.escape(saved)}"]`);
+    if (radio) radio.checked = true;
+  } catch (_) { /* unavailable */ }
+  for (const r of document.querySelectorAll('input[name="dbscan"]')) {
+    r.addEventListener('change', () => {
+      try { localStorage.setItem(DBSCAN_STORAGE_KEY, dbScanMode()); } catch (_) { /* unavailable */ }
+      syncDbScan();
+      clearResult();
+      refresh();
+    });
+  }
+  syncDbScan();
 
   // Plugin IDs reported as authentication failures (default 104410).
   const AUTH_STORAGE_KEY = 'tenable-merger.auth-plugins.v1';

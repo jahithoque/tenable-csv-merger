@@ -8,7 +8,7 @@ function mergeWorkerMain() {
   'use strict';
 
   // Must match APP_VERSION in app.js; the page warns when files are mixed.
-  const WORKER_VERSION = '2026.10.13-1';
+  const WORKER_VERSION = '2026.10.18-1';
 
   const READ_CHUNK = 4 * 1024 * 1024;        // bytes per file read
   const PROBE_CHUNK = 256 * 1024;            // bytes per read when sniffing headers
@@ -190,6 +190,7 @@ function mergeWorkerMain() {
     fqdn: ['fqdn', 'dns name', 'host-fqdn'],
     os: ['os', 'operating system', 'operating-system'],
     desc: ['description'],
+    database: ['database', 'database name', 'database sid', 'sid'],
     output: ['plugin output', 'output'],
     service: ['service', 'svc_name'],
   };
@@ -521,14 +522,40 @@ function mergeWorkerMain() {
   const HOST_TAG_RE = /<tag\s+name\s*=\s*"([^"]*)"\s*>([\s\S]*?)<\/tag\s*>/g;
   const REPORT_RE = /<Report\s[^>]*?name\s*=\s*"([^"]*)"/g;
 
+  // Which database a scan targeted, from the scan policy's "Database
+  // settings" preferences (plugin 33815), e.g. "Database SID :" = "lereg".
+  // Only identity preferences are read; logins and passwords that sit in the
+  // same section are deliberately ignored.
+  const POLICY_ITEM_RE = /<item>([\s\S]*?)<\/item>/g;
+  const DB_ID_PREF = /\b(SID|service name|database name)\b/i;
+  const DB_SECRET_PREF = /pass|login|user|key|secret|token|cred|auth/i;
+  const DB_NOT_A_NAME = /^(SID|SERVICE_NAME|SERVICE NAME)$/i;
+
+  function extractDatabases(text, found) {
+    if (text.indexOf('33815') === -1) return;
+    POLICY_ITEM_RE.lastIndex = 0;
+    let m;
+    while ((m = POLICY_ITEM_RE.exec(text))) {
+      const item = m[1];
+      if (!/<pluginId>\s*33815\s*<\/pluginId>/.test(item)) continue;
+      const name = (/<preferenceName>([\s\S]*?)<\/preferenceName>/.exec(item) || [])[1] || '';
+      if (!DB_ID_PREF.test(name) || DB_SECRET_PREF.test(name)) continue;
+      const value = decodeEntities(((/<selectedValue>([\s\S]*?)<\/selectedValue>/.exec(item) || [])[1] || '').trim());
+      if (value && !DB_NOT_A_NAME.test(value)) found.add(value);
+    }
+  }
+
   class NessusStreamParser {
     constructor(onRow) {
       this.onRow = onRow;   // return false to stop
       this.buf = '';
       this.closeFrom = 0;   // where to resume searching for </ReportHost>
       this.report = '';
+      this.databases = new Set(); // database SIDs / service names from the scan policy
       this.stopped = false;
     }
+
+    get database() { return [...this.databases].join(' / '); }
 
     push(text) {
       if (this.stopped) return;
@@ -579,6 +606,7 @@ function mergeWorkerMain() {
     }
 
     noteReport(s) {
+      extractDatabases(s, this.databases);
       REPORT_RE.lastIndex = 0;
       let m;
       while ((m = REPORT_RE.exec(s))) this.report = decodeEntities(m[1]);
@@ -699,7 +727,9 @@ function mergeWorkerMain() {
       if (head.length >= 1024 * 1024) break;
     }
     if (!/<NessusClientData_v2[\s>]/.test(head)) throw new Error('Not a .nessus (NessusClientData_v2) file');
-    return { headers: NESSUS_COLUMNS.slice(), recognized: true, compliance: /cm:compliance-|\.audit\b/.test(head) };
+    const databases = new Set();
+    extractDatabases(head, databases);
+    return { headers: NESSUS_COLUMNS.slice(), recognized: true, compliance: /cm:compliance-|\.audit\b/.test(head), databases: [...databases] };
   }
 
   async function scanFile(file) {
@@ -1405,7 +1435,7 @@ function mergeWorkerMain() {
     see(key, info, plugin, name, port) {
       let t = this.seen.get(key);
       if (!t) {
-        t = { host: info.host, ip: '', fqdn: '', os: '', report: info.report, rows: 0,
+        t = { host: info.host, ip: '', fqdn: '', os: '', report: info.report, db: info.db || '', rows: 0,
           plugins: new Map(), ports: new Set(), excluded: 0, filtered: 0 };
         this.seen.set(key, t);
       }
@@ -1440,7 +1470,7 @@ function mergeWorkerMain() {
     host(key, info) {
       let h = this.hosts.get(key);
       if (!h) {
-        h = { host: info.host || '', ip: '', fqdn: '', os: '', report: info.report || '', sev: [0, 0, 0, 0, 0, 0], comp: [0, 0, 0, 0] };
+        h = { host: info.host || '', ip: '', fqdn: '', os: '', report: info.report || '', db: info.db || '', sev: [0, 0, 0, 0, 0, 0], comp: [0, 0, 0, 0] };
         this.hosts.set(key, h);
       }
       if (!h.ip && info.ip) h.ip = info.ip;
@@ -1500,14 +1530,19 @@ function mergeWorkerMain() {
   const IDENTITY_NOTES = {
     hostip: 'Targets are host name + IP address (e.g. Oracle RAC nodes that share a host name are counted separately).',
     report: 'Targets are host + report: each report is treated as a separate database, even when several share a host.',
+    database: "Targets are databases: host + IP + Oracle SID, taken from each scan's policy. Reports without a SID stay separate per report.",
   };
 
   function buildSummary(agg, meta) {
     const sheets = [];
     const byHost = meta.identity === 'host';
-    const T = byHost ? { one: 'host', Many: 'Hosts', many: 'hosts' } : { one: 'target', Many: 'Targets', many: 'targets' };
-    const showReport = meta.identity === 'report';
-    const label = h => h.host + (h.ip && h.ip !== h.host && !byHost ? ` (${h.ip})` : '') + (showReport && h.report ? ` \u2014 ${h.report}` : '');
+    const byDb = meta.identity === 'database';
+    const T = byHost ? { one: 'host', Many: 'Hosts', many: 'hosts' }
+      : byDb ? { one: 'database', Many: 'Databases', many: 'databases' }
+        : { one: 'target', Many: 'Targets', many: 'targets' };
+    const showReport = meta.identity === 'report' || byDb;
+    const label = h => h.host + (h.ip && h.ip !== h.host && !byHost ? ` (${h.ip})` : '') +
+      (byDb ? ` \u2014 ${h.db || h.report}` : showReport && h.report ? ` \u2014 ${h.report}` : '');
     const hasVulns = agg.vulnTotal > 0;
     const hasComp = agg.compTotal > 0;
     const sevRows = SEVERITIES.filter((s, i) => i < 5 || agg.sev[5] > 0);
@@ -1678,15 +1713,18 @@ function mergeWorkerMain() {
         line([{ v: 'No authentication failures found. Credentials worked on every target that reported.', s: ST.passed, span: GRID }], 20);
       } else {
         full(`${agg.authTotal} ${agg.authTotal === 1 ? T.one : T.many} could not be scanned with the provided credentials, so their results may be incomplete.`, ST.note);
-        const cols = showReport
-          ? [['Host', 1], ['IP Address', 1], ['Report', 2], ['Protocol / Port', 1], ['User', 1], ['Error', 2]]
-          : [['Host', 2], ['IP Address', 1], ['Protocol / Port', 1], ['User', 1], ['Error', 3]];
+        const cols = byDb
+          ? [['Host', 1], ['IP Address', 1], ['Database', 1], ['Protocol / Port', 1], ['User', 1], ['Error', 3]]
+          : showReport
+            ? [['Host', 1], ['IP Address', 1], ['Report', 2], ['Protocol / Port', 1], ['User', 1], ['Error', 2]]
+            : [['Host', 2], ['IP Address', 1], ['Protocol / Port', 1], ['User', 1], ['Error', 3]];
         head(cols);
         const AUTH_ON_DASHBOARD = 25;
         for (const a of authList.slice(0, AUTH_ON_DASHBOARD)) {
           const errText = a.parsed.error || (a.output ? a.output.replace(/\s+/g, ' ').slice(0, 200) : '');
           const vals = {
             'Host': { v: a.host, s: ST.tdBold }, 'IP Address': { v: a.ip, s: ST.tdNum }, 'Report': { v: a.source, s: ST.td },
+            'Database': { v: a.db || '(unknown)', s: ST.tdNum },
             'Protocol / Port': { v: [a.parsed.protocol || a.protocol, a.parsed.port || a.port].filter(Boolean).join(' / '), s: ST.tdNum },
             'User': { v: a.parsed.user, s: ST.tdNum }, 'Error': { v: errText, s: ST.td },
           };
@@ -1706,14 +1744,17 @@ function mergeWorkerMain() {
       full(`${noResultList.length} ${noResultList.length === 1 ? T.one : T.many} responded to the scan, but every row ` +
         'they returned was excluded or informational (e.g. only port-scanner or scan-information plugins), so there are ' +
         'no compliance or vulnerability results for them. Check the port, service or credentials used for these scans.', ST.note);
-      const cols = showReport
-        ? [['Host', 1], ['IP Address', 1], ['Report', 2], ['Plugins received', 3], ['Ports seen', 1]]
-        : [['Host', 2], ['IP Address', 1], ['Plugins received', 4], ['Ports seen', 1]];
+      const cols = byDb
+        ? [['Host', 1], ['IP Address', 1], ['Database', 1], ['Plugins received', 4], ['Ports seen', 1]]
+        : showReport
+          ? [['Host', 1], ['IP Address', 1], ['Report', 2], ['Plugins received', 3], ['Ports seen', 1]]
+          : [['Host', 2], ['IP Address', 1], ['Plugins received', 4], ['Ports seen', 1]];
       head(cols);
       const NO_RESULTS_ON_DASHBOARD = 25;
       for (const t of noResultList.slice(0, NO_RESULTS_ON_DASHBOARD)) {
         const vals = {
           'Host': { v: t.host, s: ST.tdBold }, 'IP Address': { v: t.ip, s: ST.tdNum }, 'Report': { v: t.report, s: ST.td },
+          'Database': { v: t.db || '(unknown)', s: ST.tdNum },
           'Plugins received': { v: pluginsOf(t), s: ST.td }, 'Ports seen': { v: [...t.ports].join(', '), s: ST.tdNum },
         };
         line(cols.map(([name, span]) => ({ ...vals[name], span })));
@@ -1778,6 +1819,7 @@ function mergeWorkerMain() {
       const head = ['Host'];
       const widths = [22];
       if (anyIp) { head.push('IP Address'); widths.push(16); }
+      if (byDb) { head.push('Database'); widths.push(18); }
       if (showReport) { head.push('Report'); widths.push(40); }
       if (anyFqdn) { head.push('FQDN'); widths.push(30); }
       if (anyOs) { head.push('OS'); widths.push(34); }
@@ -1788,6 +1830,7 @@ function mergeWorkerMain() {
       for (const [key, h] of hostList.slice(0, XLSX_MAX_ROWS)) {
         const cells = [h.host];
         if (anyIp) cells.push(h.ip);
+        if (byDb) cells.push(h.db || '(unknown)');
         if (showReport) cells.push(h.report);
         if (anyFqdn) cells.push(h.fqdn);
         if (anyOs) cells.push(h.os);
@@ -1831,14 +1874,14 @@ function mergeWorkerMain() {
 
     // --- No Results
     if (noResultList.length) {
-      const head = ['Host', 'IP Address', 'FQDN', 'OS', 'Report', 'Rows received', 'Plugins received', 'Ports seen', 'Reason'];
+      const head = ['Host', 'IP Address', 'Database', 'FQDN', 'OS', 'Report', 'Rows received', 'Plugins received', 'Ports seen', 'Reason'];
       const nrRows = [head.map(v => ({ v, s: ST.header }))];
       for (const t of noResultList) {
-        nrRows.push(tableCells([t.host, t.ip, t.fqdn, t.os, t.report, t.rows, pluginsOf(t), [...t.ports].join(', '), t.reason]));
+        nrRows.push(tableCells([t.host, t.ip, t.db, t.fqdn, t.os, t.report, t.rows, pluginsOf(t), [...t.ports].join(', '), t.reason]));
       }
       sheets.push({
-        name: 'No Results', widths: [24, 16, 28, 28, 40, 14, 60, 20, 36], rows: nrRows,
-        freeze: true, autoHeight: true, heights: { 0: 24 }, filter: `A1:I${nrRows.length}`,
+        name: 'No Results', widths: [24, 16, 18, 28, 28, 40, 14, 60, 20, 36], rows: nrRows,
+        freeze: true, autoHeight: true, heights: { 0: 24 }, filter: `A1:J${nrRows.length}`,
       });
     }
 
@@ -1857,17 +1900,17 @@ function mergeWorkerMain() {
     }
 
     // --- Sources
-    const srcHead = ['Report', 'Type', 'Rows read', 'Rows written', 'Findings sheet', 'Duplicates removed', 'Info excluded', 'Removed by rules', 'Auth failures', 'Status'];
+    const srcHead = ['Report', 'Type', 'Database (from scan policy)', 'Rows read', 'Rows written', 'Findings sheet', 'Duplicates removed', 'Info excluded', 'Removed by rules', 'Auth failures', 'Status'];
     const srcRows = [srcHead.map(v => ({ v, s: ST.header }))];
     meta.sources.forEach((src, i) => {
       const st = meta.perFile[i] || {};
       const where = st.sheetFirst === null || st.sheetFirst === undefined ? '\u2014'
         : findingsSheetName(st.sheetFirst) + (st.sheetLast > st.sheetFirst ? ` to ${findingsSheetName(st.sheetLast)}` : '');
-      srcRows.push(tableCells([src.name, src.kind === 'nessus' ? '.nessus' : 'CSV', st.rowsIn || 0, st.rowsOut || 0, where,
+      srcRows.push(tableCells([src.name, src.kind === 'nessus' ? '.nessus' : 'CSV', st.databases || '', st.rowsIn || 0, st.rowsOut || 0, where,
         st.duplicates || 0, st.filtered || 0, st.excluded || 0, st.auth || 0,
         st.error ? `Error: ${st.error}` : st.rowsIn && !st.rowsOut ? 'OK (no rows left after filters)' : 'OK']));
     });
-    sheets.push({ name: 'Sources', widths: [60, 9, 12, 13, 26, 18, 13, 16, 13, 30], rows: srcRows, freeze: true, autoHeight: true, heights: { 0: 24 }, filter: `A1:J${srcRows.length}` });
+    sheets.push({ name: 'Sources', widths: [60, 9, 22, 12, 13, 26, 18, 13, 16, 13, 30], rows: srcRows, freeze: true, autoHeight: true, heights: { 0: 24 }, filter: `A1:K${srcRows.length}` });
 
     return { sheets };
   }
@@ -1911,7 +1954,10 @@ function mergeWorkerMain() {
     // What makes two rows belong to the same target: the host name, host + IP
     // (Oracle RAC nodes sharing a name), or host + report (one database per
     // report). Used for duplicate removal and every per-target summary.
-    const identity = ['hostip', 'report'].includes(options.identity) ? options.identity : 'host';
+    // Oracle database scans: every row is tagged with the SID from its scan's
+    // policy, and each database (host + IP + SID) is its own target.
+    const oracleMode = options.dbMode === 'oracle';
+    const identity = oracleMode ? 'database' : ['hostip', 'report'].includes(options.identity) ? options.identity : 'host';
     const authIds = new Set((options.authPlugins || []).map(v => String(v).trim()).filter(Boolean));
     const out = options.format === 'xlsx'
       ? new XlsxOutput(sink, outCols, withSummary, options.findingsRows === 'fit')
@@ -1955,14 +2001,19 @@ function mergeWorkerMain() {
         };
 
         const cell = (row, k) => (fKey[k] === -1 ? '' : (row[fKey[k]] || '').trim());
+        // A report without a detectable SID stays separate per report rather
+        // than being merged with other databases on the same host.
+        const dbPart = row => cell(row, 'database') || '#' + fi;
         const targetKey = row => {
           const host = cell(row, 'host');
           if (identity === 'hostip') return host + '\x1f' + cell(row, 'ip');
           if (identity === 'report') return host + '\x1f' + fi;
+          if (identity === 'database') return host + '\x1f' + cell(row, 'ip') + '\x1f' + dbPart(row);
           return host;
         };
         const targetInfo = row => ({
           host: cell(row, 'host'), ip: cell(row, 'ip'), fqdn: cell(row, 'fqdn'), os: cell(row, 'os'), report: src.name,
+          db: cell(row, 'database'),
         });
 
         const handleRow = row => {
@@ -2022,7 +2073,7 @@ function mergeWorkerMain() {
             } else {
               // Exact duplicate: compare the whole source row (within the
               // report only, when each report is its own target).
-              key = (identity === 'report' ? fi + '\x1e' : '') + row.join('\x1f');
+              key = (identity === 'report' ? fi + '\x1e' : identity === 'database' ? dbPart(row) + '\x1e' : '') + row.join('\x1f');
             }
             const [a, b] = hash64(key);
             if (!seen.add(a, b)) { stats.duplicates++; return; }
@@ -2069,8 +2120,12 @@ function mergeWorkerMain() {
 
         let parser;
         if (src.kind === 'nessus') {
-          setHeaders(NESSUS_COLUMNS);
-          parser = new NessusStreamParser(row => { fillCompliance(row); return handleRow(row); });
+          setHeaders(oracleMode ? NESSUS_COLUMNS.concat(['Database']) : NESSUS_COLUMNS);
+          parser = new NessusStreamParser(row => {
+            if (oracleMode) row.push(parser.database);
+            fillCompliance(row);
+            return handleRow(row);
+          });
         } else {
           let rawCols = 0;
           let derive = false;
@@ -2118,6 +2173,7 @@ function mergeWorkerMain() {
           stats.error = String(err && err.message || err);
         }
         bytesDone += sourceBytes(src) - consumed; // keep progress exact if a source stopped early
+        if (src.kind === 'nessus' && parser.databases) stats.databases = parser.database;
 
         await out.flush();
         for (const k of Object.keys(totals)) totals[k] += stats[k];
@@ -2198,5 +2254,8 @@ function mergeWorkerMain() {
   };
 
   // Exposed for the Node test harness; harmless in the browser.
-  self.__mergeInternals = { CsvStreamParser, NessusStreamParser, HashSet64, hash64, compileRules, listZip, scanFile, crc32 };
+  self.__mergeInternals = {
+    CsvStreamParser, NessusStreamParser, HashSet64, hash64, compileRules, listZip, scanFile, crc32,
+    ZipWriter, OutputSink, textChunks, xmlEscape, extractDatabases, WORKER_VERSION,
+  };
 }
