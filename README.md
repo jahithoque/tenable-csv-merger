@@ -1,6 +1,6 @@
-# Tenable Report Merger
+# Tenable Database Compliance Merger
 
-Merge any number of Tenable / Nessus scan exports into a single Excel workbook or CSV — entirely in your browser. No server, no install, no uploads: report data never leaves your machine.
+Merge any number of Tenable / Nessus database compliance scans (Oracle, SQL Server, DB2, MySQL, PostgreSQL, MongoDB, ...) into a single Excel workbook or CSV — entirely in your browser. No server, no install, no uploads: report data never leaves your machine.
 
 ## Usage
 
@@ -26,16 +26,19 @@ Works offline and straight from disk (`file://`).
 
 The choice is remembered in your browser.
 
-### Database scans (Oracle)
+### Database identification (Automatic by default)
 
-Choose **Database scans → Oracle databases** when the reports are Oracle database compliance scans (one database per scan). The tool reads the database **SID** from each `.nessus` file's scan policy (*Database settings → Database SID*) and:
+Every row gets a **Database Type** and a **Database**, and each database (host + IP + type + name) is reported separately, so databases that share a host, IP or port are never merged and duplicates are only compared within one database.
 
-- tags every row with it in a **Database** column,
-- treats each database (host + IP + SID) as its own target, so databases sharing a host, IP or port are never merged,
-- compares duplicates only within the same database (the same database reported twice is still de-duplicated),
-- replaces the Targets sheet with a **Databases** sheet and shows the SID in the report list, Sources sheet, No Results and Auth Failures.
+| Source of the name | Used for |
+| --- | --- |
+| Scan policy *Database settings* (Database SID, service / database / instance name) | Scans of one database, e.g. Oracle (SID) |
+| SQL Server service accounts printed by the checks (`NT SERVICE\MSSQL$<instance>`, `SQLAgent$<instance>`, `MSSQLSERVER` = default instance) | One SQL Server scan covering several instances. A host's results are read together: the instance is applied to every row on its port; when instances share a port, each audit run (a repeated check starts the next instance's run) gets the instance it names |
+| None found | Kept apart by port and report, shown as *(unnamed, port N)* |
 
-Only the database-identity preferences are read from the scan policy; logins and passwords in the same section are ignored and never written to the output. A report whose policy has no SID is kept separate per report.
+The type comes from the policy (*DB Type*), the service name, the audit file name or the port (1433, 1521, 50000, 3306, 5432, 27017, ...). Anything that can't be told apart is shown as `A / B`, never guessed.
+
+The report list shows each file's detected type and database; the workbook adds a **Databases** sheet (type, name, ports, results, status), a **Databases by type** table on the dashboard, and the detected types and databases per file on **Sources**. Only database-identity preferences are read from the scan policy; logins and passwords are ignored and never written out. Choose **Off** for non-database scans.
 
 ### Target identity
 

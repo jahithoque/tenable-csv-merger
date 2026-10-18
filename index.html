@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Tenable Report Merger</title>
+  <title>Tenable Database Compliance Merger</title>
   <!-- Styles are inlined: on some Windows setups a bad registry MIME type for
        .css makes browsers ignore stylesheets loaded from local files. -->
   <style>
@@ -271,7 +271,7 @@
   <header class="topbar">
     <div class="brand">
       <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M4 5h7v6H4zM13 5h7v6h-7zM4 13h16v6H4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
-      <h1>Tenable Report Merger</h1>
+      <h1>Tenable Database Compliance Merger</h1>
       <span class="version" id="app-version"></span>
     </div>
     <p class="privacy">
@@ -317,18 +317,18 @@
       <fieldset class="report-type">
         <legend>Report type</legend>
         <div class="format" role="radiogroup" aria-label="Report type">
-          <label><input type="radio" name="mode" value="auto" checked><span>Auto-detect</span></label>
+          <label><input type="radio" name="mode" value="auto"><span>Auto-detect</span></label>
           <label><input type="radio" name="mode" value="vulnerability"><span>Vulnerability scan</span></label>
-          <label><input type="radio" name="mode" value="compliance"><span>Compliance audit</span></label>
+          <label><input type="radio" name="mode" value="compliance" checked><span>Compliance audit</span></label>
         </div>
         <p class="mode-help" id="mode-help"></p>
       </fieldset>
 
       <fieldset class="report-type">
-        <legend>Database scans</legend>
+        <legend>Database identification</legend>
         <div class="format" role="radiogroup" aria-label="Database scans">
-          <label><input type="radio" name="dbscan" value="none" checked><span>Not database scans</span></label>
-          <label><input type="radio" name="dbscan" value="oracle"><span>Oracle databases</span></label>
+          <label><input type="radio" name="dbscan" value="auto" checked><span>Automatic</span></label>
+          <label><input type="radio" name="dbscan" value="none"><span>Off</span></label>
         </div>
         <p class="mode-help" id="dbscan-help"></p>
       </fieldset>

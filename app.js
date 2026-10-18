@@ -4,7 +4,7 @@
 
   // Shown in the page header and stamped on every workbook's dashboard, so a
   // report can be traced to the build that produced it.
-  const APP_VERSION = '2026.10.18-1';
+  const APP_VERSION = '2026.10.18-2';
   const EXCEL_MAX_ROWS = 1048575; // 1,048,576 minus the header row
   const SEVERITY_ORDER = [
     ['critical', 'Critical', 'var(--sev-critical)'],
@@ -118,6 +118,7 @@
       entry.recognized = m.recognized;
       entry.compliance = !!m.compliance;
       entry.databases = m.databases || [];
+      entry.dbType = m.dbType || '';
       entry.derive = !!m.derive;
     }
     renderRow(entry);
@@ -139,7 +140,7 @@
         id: state.nextId++, file: zip.file, zipEntry: c.entry, kind: c.kind,
         name: `${zip.name} \u203A ${c.name}`, size: c.size, fp, merged: null,
         status: c.error ? 'error' : 'ready', error: c.error, headers: c.headers, recognized: c.recognized,
-        compliance: !!c.compliance, derive: !!c.derive, databases: c.databases || [],
+        compliance: !!c.compliance, derive: !!c.derive, databases: c.databases || [], dbType: c.dbType || '',
       });
     }
     const notes = [];
@@ -284,12 +285,17 @@
     else if (entry.status === 'error') { cls = 'err'; text = entry.error; }
     else if (entry.mergeError) { cls = 'err'; text = 'Failed: ' + entry.mergeError; }
     else if (!entry.recognized) { cls = 'warn'; text = 'No Plugin ID / Host column'; }
-    else if (dbScanMode() === 'oracle' && entry.kind === 'nessus') {
-      const sids = entry.databases || [];
-      cls = sids.length === 1 ? 'ok' : 'warn';
-      text = sids.length === 1 ? `Ready \u00b7 Oracle SID ${sids[0]}`
-        : sids.length ? `Ready \u00b7 several SIDs: ${sids.join(', ')}`
-          : 'Ready \u00b7 no SID in scan policy (kept separate per report)';
+    else if (dbScanMode() === 'auto' && entry.kind === 'nessus') {
+      // What the scan policy / first part of the file says about the database.
+      const names = entry.databases || [];
+      const type = entry.dbType || '';
+      const mssql = type === 'Microsoft SQL Server';
+      cls = type && (names.length === 1 || mssql) ? 'ok' : 'warn';
+      text = `Ready \u00b7 ${type || 'database type not found'}` + (
+        names.length === 1 ? ` \u00b7 ${names[0]}`
+          : names.length > 1 ? ` \u00b7 several databases: ${names.join(', ')}`
+            : mssql ? ' \u00b7 instances identified while merging'
+              : ' \u00b7 no database name in scan policy (kept apart by port and report)');
     } else { cls = 'ok'; text = 'Ready'; }
     st.innerHTML = '';
     const span = document.createElement('span');
@@ -360,8 +366,11 @@
         else map.set(key, { name: h, key, count: 1 });
       }
     }
-    if (dbScanMode() === 'oracle' && map.size && !map.has('database')) {
-      map.set('database', { name: 'Database', key: 'database', count: state.entries.filter(x => x.status === 'ready').length });
+    if (dbScanMode() === 'auto' && map.size) {
+      const ready = state.entries.filter(x => x.status === 'ready').length;
+      for (const name of ['Database Type', 'Database']) {
+        if (!map.has(name.toLowerCase())) map.set(name.toLowerCase(), { name, key: name.toLowerCase(), count: ready });
+      }
     }
     // In compliance-audit mode every report gets these, derived from Risk / Name if missing.
     if (reportMode() === 'compliance' && map.size) {
@@ -1033,26 +1042,27 @@
   // scan policy) is its own target, overriding Target identity.
   const DBSCAN_STORAGE_KEY = 'tenable-merger.dbscan.v1';
   const DBSCAN_HELP = {
-    none: 'Rows are grouped by the Target identity below.',
-    oracle: 'Each .nessus file\u2019s scan policy names the database it scanned (Database SID). Every row is tagged with that SID in a ' +
-      'Database column, each database (host + IP + SID) is reported separately, and duplicates are only compared within the same ' +
-      'database. Target identity is set automatically.',
+    none: 'Rows are grouped by the Target identity below (for non-database scans).',
+    auto: 'Every row gets a Database Type and Database. Names come from the scan policy (Oracle SID, service or database name) or, for ' +
+      'SQL Server, from the instance service accounts the checks print (NT SERVICE\\MSSQL$<instance>), mapped to every row on that ' +
+      'host and port. Each database is reported separately and duplicates are only compared within one database. Works for Oracle, ' +
+      'SQL Server, DB2, MySQL, PostgreSQL, MongoDB and others; databases without a name are kept apart by port and report.',
   };
   function dbScanMode() {
     const r = document.querySelector('input[name="dbscan"]:checked');
     return r ? r.value : 'none';
   }
   function syncDbScan() {
-    const oracle = dbScanMode() === 'oracle';
+    const auto = dbScanMode() === 'auto';
     el.dbscanHelp.textContent = DBSCAN_HELP[dbScanMode()];
-    for (const r of document.querySelectorAll('input[name="identity"]')) r.disabled = oracle;
-    el.identityHelp.textContent = oracle
-      ? 'Set by Oracle databases: each database is host + IP + SID.'
+    for (const r of document.querySelectorAll('input[name="identity"]')) r.disabled = auto;
+    el.identityHelp.textContent = auto
+      ? 'Set by Database identification: each database is host + IP + database type + name.'
       : IDENTITY_HELP[targetIdentity()];
     for (const entry of state.entries) renderRow(entry);
   }
   try {
-    const saved = localStorage.getItem(DBSCAN_STORAGE_KEY);
+    const saved = (localStorage.getItem(DBSCAN_STORAGE_KEY) || '').replace('oracle', 'auto'); // earlier name
     const radio = saved && document.querySelector(`input[name="dbscan"][value="${CSS.escape(saved)}"]`);
     if (radio) radio.checked = true;
   } catch (_) { /* unavailable */ }

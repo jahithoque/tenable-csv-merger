@@ -8,7 +8,7 @@ function mergeWorkerMain() {
   'use strict';
 
   // Must match APP_VERSION in app.js; the page warns when files are mixed.
-  const WORKER_VERSION = '2026.10.18-1';
+  const WORKER_VERSION = '2026.10.18-2';
 
   const READ_CHUNK = 4 * 1024 * 1024;        // bytes per file read
   const PROBE_CHUNK = 256 * 1024;            // bytes per read when sniffing headers
@@ -191,6 +191,7 @@ function mergeWorkerMain() {
     os: ['os', 'operating system', 'operating-system'],
     desc: ['description'],
     database: ['database', 'database name', 'database sid', 'sid'],
+    dbtype: ['database type', 'db type'],
     output: ['plugin output', 'output'],
     service: ['service', 'svc_name'],
   };
@@ -527,11 +528,47 @@ function mergeWorkerMain() {
   // Only identity preferences are read; logins and passwords that sit in the
   // same section are deliberately ignored.
   const POLICY_ITEM_RE = /<item>([\s\S]*?)<\/item>/g;
-  const DB_ID_PREF = /\b(SID|service name|database name)\b/i;
+  const DB_ID_PREF = /\b(SID|service name|database name|instance name|instance)\b/i;
   const DB_SECRET_PREF = /pass|login|user|key|secret|token|cred|auth/i;
   const DB_NOT_A_NAME = /^(SID|SERVICE_NAME|SERVICE NAME)$/i;
 
-  function extractDatabases(text, found) {
+  // Database type from free text (policy "DB Type", service name, plugin or
+  // audit file name), then from the well-known port.
+  const DB_TYPES = [
+    ['Microsoft SQL Server', /\b(?:ms ?sql|sql ?server|mssql)/i, ['1433']],
+    ['Oracle', /\boracle|tnslsnr/i, ['1521', '1526']],
+    ['IBM DB2', /\bdb2/i, ['50000', '50001']],
+    ['MySQL', /\b(?:mysql|mariadb)/i, ['3306']],
+    ['PostgreSQL', /\bpostgre/i, ['5432']],
+    ['MongoDB', /\bmongo/i, ['27017']],
+    ['Sybase', /\bsybase/i, []],
+    ['Informix', /\binformix/i, ['9088']],
+  ];
+  function dbTypeOf(...texts) {
+    for (const t of texts) {
+      if (!t) continue;
+      for (const [name, re] of DB_TYPES) if (re.test(t)) return name;
+    }
+    return '';
+  }
+  const dbTypeOfPort = port => (DB_TYPES.find(([, , ports]) => ports.includes(port)) || [''])[0];
+
+  // SQL Server instance names from service accounts / service names that a
+  // check printed, e.g. NT SERVICE\MSSQL$SALES -> SALES, NT SERVICE\MSSQLSERVER
+  // -> MSSQLSERVER (default instance). Only host-specific output is searched;
+  // descriptions and solutions are shared text and may mention placeholders.
+  const MSSQL_NAMED_RE = /\b(?:MSSQL|SQLAgent|MSSQLFDLauncher|MSSQLLaunchpad|SQLTELEMETRY)\$([A-Za-z0-9_#@-]{1,64})/gi;
+  const MSSQL_DEFAULT_RE = /NT SERVICE\\{1,2}(?:MSSQLSERVER|SQLSERVERAGENT)\b/i;
+  function mssqlInstancesIn(text, add) {
+    if (!text) return;
+    MSSQL_NAMED_RE.lastIndex = 0;
+    let m;
+    while ((m = MSSQL_NAMED_RE.exec(text))) add(m[1]);
+    if (MSSQL_DEFAULT_RE.test(text)) add('MSSQLSERVER');
+  }
+  const HOST_OUTPUT_RE = /<(plugin_output|cm:compliance-actual-value)>([\s\S]*?)<\/\1>/g;
+
+  function extractDatabases(text, found, types) {
     if (text.indexOf('33815') === -1) return;
     POLICY_ITEM_RE.lastIndex = 0;
     let m;
@@ -539,6 +576,11 @@ function mergeWorkerMain() {
       const item = m[1];
       if (!/<pluginId>\s*33815\s*<\/pluginId>/.test(item)) continue;
       const name = (/<preferenceName>([\s\S]*?)<\/preferenceName>/.exec(item) || [])[1] || '';
+      if (types && /\b(?:DB|database) type\b/i.test(name) && !DB_SECRET_PREF.test(name)) {
+        const t = dbTypeOf(decodeEntities((/<selectedValue>([\s\S]*?)<\/selectedValue>/.exec(item) || [])[1] || ''));
+        if (t) types.add(t);
+        continue;
+      }
       if (!DB_ID_PREF.test(name) || DB_SECRET_PREF.test(name)) continue;
       const value = decodeEntities(((/<selectedValue>([\s\S]*?)<\/selectedValue>/.exec(item) || [])[1] || '').trim());
       if (value && !DB_NOT_A_NAME.test(value)) found.add(value);
@@ -546,16 +588,21 @@ function mergeWorkerMain() {
   }
 
   class NessusStreamParser {
-    constructor(onRow) {
+    // withDb: append "Database Type" and "Database" to every row.
+    constructor(onRow, { withDb = false } = {}) {
       this.onRow = onRow;   // return false to stop
+      this.withDb = withDb;
       this.buf = '';
       this.closeFrom = 0;   // where to resume searching for </ReportHost>
       this.report = '';
       this.databases = new Set(); // database SIDs / service names from the scan policy
+      this.policyTypes = new Set();
+      this.found = { types: new Set(), names: new Set() }; // what was detected, for the Sources sheet
       this.stopped = false;
     }
 
     get database() { return [...this.databases].join(' / '); }
+    get policyName() { return this.databases.size === 1 ? [...this.databases][0] : ''; }
 
     push(text) {
       if (this.stopped) return;
@@ -606,7 +653,7 @@ function mergeWorkerMain() {
     }
 
     noteReport(s) {
-      extractDatabases(s, this.databases);
+      extractDatabases(s, this.databases, this.policyTypes);
       REPORT_RE.lastIndex = 0;
       let m;
       while ((m = REPORT_RE.exec(s))) this.report = decodeEntities(m[1]);
@@ -634,11 +681,12 @@ function mergeWorkerMain() {
         start: props.HOST_START || '', end: props.HOST_END || '',
       };
 
+      const items = [];
       for (;;) {
         const idx = block.indexOf('<ReportItem', i);
-        if (idx === -1) return;
+        if (idx === -1) break;
         const te = tagEnd(block, idx);
-        if (te === -1) return;
+        if (te === -1) break;
         const attrs = parseAttrs(block.slice(idx + 11, te));
         let body = '';
         if (block.charCodeAt(te - 1) === 47) { // self-closing <ReportItem ... />
@@ -648,11 +696,93 @@ function mergeWorkerMain() {
           body = block.slice(te + 1, close === -1 ? block.length : close);
           i = close === -1 ? block.length : close + 13;
         }
-        if (this.item(host, attrs, body) === false) { this.stopped = true; return; }
+        items.push([attrs, body]);
+      }
+      if (this.withDb) host.instanceFor = this.learnInstances(items);
+      for (let k = 0; k < items.length; k++) {
+        if (this.item(host, items[k][0], items[k][1], k) === false) { this.stopped = true; return; }
       }
     }
 
-    item(host, a, body) {
+    // A host's results arrive together, so SQL Server instance names printed
+    // by some checks can be applied to the other rows of the same instance:
+    //  - per port: every row on a port gets the instance named on that port;
+    //  - shared port: the audit runs once per instance, so a repeated check
+    //    name on the same port starts the next instance's run, and each run
+    //    gets the instance its own checks name.
+    // Anything that can't be told apart is shown as "A / B", never guessed.
+    learnInstances(items) {
+      const display = new Map();
+      const info = items.map(([attrs, body]) => {
+        const names = new Map();
+        if (body) {
+          HOST_OUTPUT_RE.lastIndex = 0;
+          let m;
+          while ((m = HOST_OUTPUT_RE.exec(body))) {
+            mssqlInstancesIn(xmlText(m[2]), name => {
+              const key = name.toUpperCase();
+              if (!display.has(key)) display.set(key, name);
+              names.set(key, (names.get(key) || 0) + 1);
+            });
+          }
+        }
+        const check = body ? ((/<cm:compliance-check-name>([\s\S]*?)<\/cm:compliance-check-name>/.exec(body) || [])[1] || '') : '';
+        return { port: attrs.port || '', check, names };
+      });
+      const add = (into, from) => { for (const [k, n] of from) into.set(k, (into.get(k) || 0) + n); };
+      const best = counts => {
+        if (!counts.size) return '';
+        const ranked = [...counts].sort((a, b) => b[1] - a[1]);
+        return ranked.filter(([, n]) => n === ranked[0][1]).map(([k]) => display.get(k)).sort().join(' / ');
+      };
+      const byPort = new Map();
+      const overall = new Map();
+      for (const it of info) {
+        if (!byPort.has(it.port)) byPort.set(it.port, new Map());
+        add(byPort.get(it.port), it.names);
+        add(overall, it.names);
+      }
+      const perItem = new Array(items.length).fill(null);
+      for (const [port, counts] of byPort) {
+        if (counts.size < 2) continue;
+        // Shared port: split this port's rows into runs at each repeated check.
+        const runs = [];
+        let run = null;
+        info.forEach((it, idx) => {
+          if (it.port !== port) return;
+          if (!run || (it.check && run.checks.has(it.check))) { run = { checks: new Set(), names: new Map(), idx: [] }; runs.push(run); }
+          if (it.check) run.checks.add(it.check);
+          add(run.names, it.names);
+          run.idx.push(idx);
+        });
+        if (runs.length < 2) continue; // one run naming several instances: can't split
+        for (const r of runs) {
+          const name = best(r.names);
+          if (name && !name.includes(' / ')) for (const idx of r.idx) perItem[idx] = name;
+        }
+      }
+      return (port, idx) => {
+        if (idx !== undefined && perItem[idx]) return perItem[idx];
+        const counts = byPort.get(port);
+        if (counts && counts.size) return best(counts);
+        if (overall.size === 1) return display.get([...overall.keys()][0]);
+        return '';
+      };
+    }
+
+    dbFields(host, a, f, idx) {
+      const port = a.port || '';
+      const instance = host.instanceFor ? host.instanceFor(port, idx) : '';
+      const name = instance || this.policyName;
+      const type = [...this.policyTypes][0] ||
+        dbTypeOf(a.svc_name, f['cm:compliance-audit-file'] && f['cm:compliance-audit-file'][0], a.pluginName) ||
+        (instance ? 'Microsoft SQL Server' : '') || dbTypeOfPort(port);
+      if (type) this.found.types.add(type);
+      if (name) this.found.names.add(name);
+      return [type, name];
+    }
+
+    item(host, a, body, idx) {
       const f = Object.create(null);
       CHILD_RE.lastIndex = 0;
       let m;
@@ -681,6 +811,7 @@ function mergeWorkerMain() {
       }
       row.push(check, result, one('cm:compliance-actual-value'), one('cm:compliance-policy-value'),
         one('cm:compliance-reference'), one('cm:compliance-audit-file'));
+      if (this.withDb) row.push(...this.dbFields(host, a, f, idx));
       const cves = f.cve;
       if (!cves || cves.length === 0) return this.onRow(row);
       for (const cve of cves) {
@@ -728,8 +859,20 @@ function mergeWorkerMain() {
     }
     if (!/<NessusClientData_v2[\s>]/.test(head)) throw new Error('Not a .nessus (NessusClientData_v2) file');
     const databases = new Set();
-    extractDatabases(head, databases);
-    return { headers: NESSUS_COLUMNS.slice(), recognized: true, compliance: /cm:compliance-|\.audit\b/.test(head), databases: [...databases] };
+    const types = new Set();
+    extractDatabases(head, databases, types);
+    let dbType = [...types][0] || '';
+    if (!dbType) {
+      const svc = /<ReportItem[^>]*\bsvc_name="([^"]*)"[^>]*pluginFamily="Policy Compliance"/.exec(head) ||
+        /<ReportItem[^>]*pluginFamily="Policy Compliance"[^>]*/.exec(head);
+      const audit = /<cm:compliance-audit-file>([^<]*)</.exec(head);
+      dbType = dbTypeOf(svc && svc[1], audit && audit[1]);
+      if (!dbType) { const instances = new Set(); mssqlInstancesIn(head, n => instances.add(n)); if (instances.size) dbType = 'Microsoft SQL Server'; }
+    }
+    return {
+      headers: NESSUS_COLUMNS.slice(), recognized: true, compliance: /cm:compliance-|\.audit\b/.test(head),
+      databases: [...databases], dbType,
+    };
   }
 
   async function scanFile(file) {
@@ -1435,7 +1578,7 @@ function mergeWorkerMain() {
     see(key, info, plugin, name, port) {
       let t = this.seen.get(key);
       if (!t) {
-        t = { host: info.host, ip: '', fqdn: '', os: '', report: info.report, db: info.db || '', rows: 0,
+        t = { host: info.host, ip: '', fqdn: '', os: '', report: info.report, db: info.db || '', dbType: info.dbType || '', rows: 0,
           plugins: new Map(), ports: new Set(), excluded: 0, filtered: 0 };
         this.seen.set(key, t);
       }
@@ -1470,9 +1613,12 @@ function mergeWorkerMain() {
     host(key, info) {
       let h = this.hosts.get(key);
       if (!h) {
-        h = { host: info.host || '', ip: '', fqdn: '', os: '', report: info.report || '', db: info.db || '', sev: [0, 0, 0, 0, 0, 0], comp: [0, 0, 0, 0] };
+        h = { host: info.host || '', ip: '', fqdn: '', os: '', report: info.report || '', db: info.db || '', dbType: info.dbType || '',
+          ports: new Set(), sev: [0, 0, 0, 0, 0, 0], comp: [0, 0, 0, 0] };
         this.hosts.set(key, h);
       }
+      if (info.port && info.port !== '0' && h.ports.size < 10) h.ports.add(info.port);
+      if (!h.dbType && info.dbType) h.dbType = info.dbType;
       if (!h.ip && info.ip) h.ip = info.ip;
       if (!h.fqdn && info.fqdn) h.fqdn = info.fqdn;
       if (!h.os && info.os) h.os = info.os;
@@ -1530,7 +1676,8 @@ function mergeWorkerMain() {
   const IDENTITY_NOTES = {
     hostip: 'Targets are host name + IP address (e.g. Oracle RAC nodes that share a host name are counted separately).',
     report: 'Targets are host + report: each report is treated as a separate database, even when several share a host.',
-    database: "Targets are databases: host + IP + Oracle SID, taken from each scan's policy. Reports without a SID stay separate per report.",
+    database: 'Targets are databases: host + IP + database type + name. Names come from the scan policy (e.g. Oracle SID) or, for SQL Server, ' +
+      'from the instance service accounts (NT SERVICE\\MSSQL$<instance>). Unnamed databases are kept apart by port and report.',
   };
 
   function buildSummary(agg, meta) {
@@ -1541,8 +1688,9 @@ function mergeWorkerMain() {
       : byDb ? { one: 'database', Many: 'Databases', many: 'databases' }
         : { one: 'target', Many: 'Targets', many: 'targets' };
     const showReport = meta.identity === 'report' || byDb;
+    const dbLabel = t => t.db || ([...(t.ports || [])][0] || t.port ? `(unnamed, port ${[...(t.ports || [])][0] || t.port})` : '(unnamed)');
     const label = h => h.host + (h.ip && h.ip !== h.host && !byHost ? ` (${h.ip})` : '') +
-      (byDb ? ` \u2014 ${h.db || h.report}` : showReport && h.report ? ` \u2014 ${h.report}` : '');
+      (byDb ? ` \u2014 ${h.dbType ? h.dbType + ': ' : ''}${dbLabel(h)}` : showReport && h.report ? ` \u2014 ${h.report}` : '');
     const hasVulns = agg.vulnTotal > 0;
     const hasComp = agg.compTotal > 0;
     const sevRows = SEVERITIES.filter((s, i) => i < 5 || agg.sev[5] > 0);
@@ -1611,13 +1759,14 @@ function mergeWorkerMain() {
     const full = (v, s, ht) => line([{ v, s, span: GRID }], ht);
     const head = labels => line(labels.map(([v, span]) => ({ v, s: ST.header, span })), 24);
 
-    full('Tenable Report \u2014 Merged Summary', ST.title, 34);
+    full('Database Compliance \u2014 Merged Summary', ST.title, 34);
     full(`Generated ${meta.generated} from ${meta.reports} report${meta.reports === 1 ? '' : 's'}` +
-      (meta.appVersion ? ` \u00B7 Tenable Report Merger v${meta.appVersion}` : ''), ST.subtitle, 18);
+      (meta.appVersion ? ` \u00B7 Tenable Database Compliance Merger v${meta.appVersion}` : ''), ST.subtitle, 18);
     blank(10);
 
     // KPI tiles: 4 per row (2 columns each); a short last row is centred.
     const kpis = [['Reports merged', meta.reports, ST.kpiValue], [`${T.Many} scanned`, agg.hosts.size, ST.kpiValue]];
+    if (byDb) kpis.push(['Hosts', new Set([...agg.hosts.values()].map(h => h.host + '\x1f' + h.ip)).size, ST.kpiValue]);
     if (hasComp) {
       kpis.push(['Compliance score', compScore, ST.kpiPct],
         ['Failed checks', agg.comp[1], agg.comp[1] ? ST.kpiBad : ST.kpiGood],
@@ -1710,7 +1859,7 @@ function mergeWorkerMain() {
     if (meta.authPlugins.length) {
       full(`Authentication failures (plugin ${meta.authPlugins.join(', ')})`, ST.section, 24);
       if (!authList.length) {
-        line([{ v: 'No authentication failures found. Credentials worked on every target that reported.', s: ST.passed, span: GRID }], 20);
+        line([{ v: `No authentication failures found. Credentials worked on every ${T.one} that reported.`, s: ST.passed, span: GRID }], 20);
       } else {
         full(`${agg.authTotal} ${agg.authTotal === 1 ? T.one : T.many} could not be scanned with the provided credentials, so their results may be incomplete.`, ST.note);
         const cols = byDb
@@ -1724,7 +1873,7 @@ function mergeWorkerMain() {
           const errText = a.parsed.error || (a.output ? a.output.replace(/\s+/g, ' ').slice(0, 200) : '');
           const vals = {
             'Host': { v: a.host, s: ST.tdBold }, 'IP Address': { v: a.ip, s: ST.tdNum }, 'Report': { v: a.source, s: ST.td },
-            'Database': { v: a.db || '(unknown)', s: ST.tdNum },
+            'Database': { v: dbLabel(a), s: ST.tdNum },
             'Protocol / Port': { v: [a.parsed.protocol || a.protocol, a.parsed.port || a.port].filter(Boolean).join(' / '), s: ST.tdNum },
             'User': { v: a.parsed.user, s: ST.tdNum }, 'Error': { v: errText, s: ST.td },
           };
@@ -1733,6 +1882,27 @@ function mergeWorkerMain() {
         if (authList.length > AUTH_ON_DASHBOARD) {
           full(`\u2026 and ${authList.length - AUTH_ON_DASHBOARD} more. See the "Auth Failures" sheet.`, ST.note);
         }
+      }
+      blank(10);
+    }
+
+    if (byDb) {
+      const types = new Map();
+      for (const [key, h] of agg.hosts) {
+        const t = h.dbType || '(unknown type)';
+        if (!types.has(t)) types.set(t, { n: 0, comp: [0, 0, 0, 0], auth: 0, none: 0 });
+        const e = types.get(t);
+        e.n++;
+        h.comp.forEach((v, i) => { e.comp[i] += v; });
+        if (agg.authHosts.has(key)) e.auth++;
+        else if (noResultKeys.has(key)) e.none++;
+      }
+      full('Databases by type', ST.section, 24);
+      head([['Database type', 2], ['Databases', 1], ['Passed', 1], ['Failed', 1], ['Warning / Manual', 1], ['Pass rate', 1], ['Auth failed / no results', 1]]);
+      for (const [t, e] of [...types].sort((a, b) => b[1].n - a[1].n || collator.compare(a[0], b[0]))) {
+        line([{ v: t, s: ST.tdBold, span: 2 }, { v: e.n, s: ST.tdNum }, { v: e.comp[0], s: ST.tdNum }, { v: e.comp[1], s: ST.tdNum },
+          { v: e.comp[2], s: ST.tdNum }, e.comp.some(Boolean) ? { v: passRate(e.comp), s: ST.tdPct } : { v: '', s: ST.tdNum },
+          { v: `${e.auth} / ${e.none}`, s: ST.tdNum }]);
       }
       blank(10);
     }
@@ -1754,7 +1924,7 @@ function mergeWorkerMain() {
       for (const t of noResultList.slice(0, NO_RESULTS_ON_DASHBOARD)) {
         const vals = {
           'Host': { v: t.host, s: ST.tdBold }, 'IP Address': { v: t.ip, s: ST.tdNum }, 'Report': { v: t.report, s: ST.td },
-          'Database': { v: t.db || '(unknown)', s: ST.tdNum },
+          'Database': { v: dbLabel(t), s: ST.tdNum },
           'Plugins received': { v: pluginsOf(t), s: ST.td }, 'Ports seen': { v: [...t.ports].join(', '), s: ST.tdNum },
         };
         line(cols.map(([name, span]) => ({ ...vals[name], span })));
@@ -1767,7 +1937,7 @@ function mergeWorkerMain() {
 
     if (hostList.length) {
       full(`Top 10 ${T.many} by risk`, ST.section, 24);
-      const name = byHost ? 'Host' : 'Target';
+      const name = byHost ? 'Host' : byDb ? 'Database' : 'Target';
       if (hasVulns && hasComp) {
         head([[name, 2], ['Critical', 1], ['High', 1], ['Medium', 1], ['Low', 1], ['Failed checks', 1], ['Pass rate', 1]]);
       } else if (hasVulns) {
@@ -1819,7 +1989,7 @@ function mergeWorkerMain() {
       const head = ['Host'];
       const widths = [22];
       if (anyIp) { head.push('IP Address'); widths.push(16); }
-      if (byDb) { head.push('Database'); widths.push(18); }
+      if (byDb) { head.push('Database Type', 'Database', 'Port(s)'); widths.push(22, 22, 12); }
       if (showReport) { head.push('Report'); widths.push(40); }
       if (anyFqdn) { head.push('FQDN'); widths.push(30); }
       if (anyOs) { head.push('OS'); widths.push(34); }
@@ -1830,7 +2000,7 @@ function mergeWorkerMain() {
       for (const [key, h] of hostList.slice(0, XLSX_MAX_ROWS)) {
         const cells = [h.host];
         if (anyIp) cells.push(h.ip);
-        if (byDb) cells.push(h.db || '(unknown)');
+        if (byDb) cells.push(h.dbType || '(unknown)', dbLabel(h), [...h.ports].join(', '));
         if (showReport) cells.push(h.report);
         if (anyFqdn) cells.push(h.fqdn);
         if (anyOs) cells.push(h.os);
@@ -1874,14 +2044,14 @@ function mergeWorkerMain() {
 
     // --- No Results
     if (noResultList.length) {
-      const head = ['Host', 'IP Address', 'Database', 'FQDN', 'OS', 'Report', 'Rows received', 'Plugins received', 'Ports seen', 'Reason'];
+      const head = ['Host', 'IP Address', 'Database Type', 'Database', 'FQDN', 'OS', 'Report', 'Rows received', 'Plugins received', 'Ports seen', 'Reason'];
       const nrRows = [head.map(v => ({ v, s: ST.header }))];
       for (const t of noResultList) {
-        nrRows.push(tableCells([t.host, t.ip, t.db, t.fqdn, t.os, t.report, t.rows, pluginsOf(t), [...t.ports].join(', '), t.reason]));
+        nrRows.push(tableCells([t.host, t.ip, t.dbType, t.db, t.fqdn, t.os, t.report, t.rows, pluginsOf(t), [...t.ports].join(', '), t.reason]));
       }
       sheets.push({
-        name: 'No Results', widths: [24, 16, 18, 28, 28, 40, 14, 60, 20, 36], rows: nrRows,
-        freeze: true, autoHeight: true, heights: { 0: 24 }, filter: `A1:J${nrRows.length}`,
+        name: 'No Results', widths: [24, 16, 22, 18, 28, 28, 40, 14, 60, 20, 36], rows: nrRows,
+        freeze: true, autoHeight: true, heights: { 0: 24 }, filter: `A1:K${nrRows.length}`,
       });
     }
 
@@ -1900,17 +2070,17 @@ function mergeWorkerMain() {
     }
 
     // --- Sources
-    const srcHead = ['Report', 'Type', 'Database (from scan policy)', 'Rows read', 'Rows written', 'Findings sheet', 'Duplicates removed', 'Info excluded', 'Removed by rules', 'Auth failures', 'Status'];
+    const srcHead = ['Report', 'Type', 'Database type(s)', 'Databases detected', 'Rows read', 'Rows written', 'Findings sheet', 'Duplicates removed', 'Info excluded', 'Removed by rules', 'Auth failures', 'Status'];
     const srcRows = [srcHead.map(v => ({ v, s: ST.header }))];
     meta.sources.forEach((src, i) => {
       const st = meta.perFile[i] || {};
       const where = st.sheetFirst === null || st.sheetFirst === undefined ? '\u2014'
         : findingsSheetName(st.sheetFirst) + (st.sheetLast > st.sheetFirst ? ` to ${findingsSheetName(st.sheetLast)}` : '');
-      srcRows.push(tableCells([src.name, src.kind === 'nessus' ? '.nessus' : 'CSV', st.databases || '', st.rowsIn || 0, st.rowsOut || 0, where,
+      srcRows.push(tableCells([src.name, src.kind === 'nessus' ? '.nessus' : 'CSV', st.dbTypes || '', st.databases || '', st.rowsIn || 0, st.rowsOut || 0, where,
         st.duplicates || 0, st.filtered || 0, st.excluded || 0, st.auth || 0,
         st.error ? `Error: ${st.error}` : st.rowsIn && !st.rowsOut ? 'OK (no rows left after filters)' : 'OK']));
     });
-    sheets.push({ name: 'Sources', widths: [60, 9, 22, 12, 13, 26, 18, 13, 16, 13, 30], rows: srcRows, freeze: true, autoHeight: true, heights: { 0: 24 }, filter: `A1:K${srcRows.length}` });
+    sheets.push({ name: 'Sources', widths: [60, 9, 22, 30, 12, 13, 26, 18, 13, 16, 13, 30], rows: srcRows, freeze: true, autoHeight: true, heights: { 0: 24 }, filter: `A1:L${srcRows.length}` });
 
     return { sheets };
   }
@@ -1954,10 +2124,12 @@ function mergeWorkerMain() {
     // What makes two rows belong to the same target: the host name, host + IP
     // (Oracle RAC nodes sharing a name), or host + report (one database per
     // report). Used for duplicate removal and every per-target summary.
-    // Oracle database scans: every row is tagged with the SID from its scan's
-    // policy, and each database (host + IP + SID) is its own target.
-    const oracleMode = options.dbMode === 'oracle';
-    const identity = oracleMode ? 'database' : ['hostip', 'report'].includes(options.identity) ? options.identity : 'host';
+    // Database identification (Oracle, SQL Server, DB2, MySQL, ...): every row
+    // gets a Database Type and Database (policy SID / service name, or the SQL
+    // Server instance learned per host + port), and each database is its own
+    // target. 'oracle' is the setting's earlier name.
+    const dbMode = options.dbMode === 'auto' || options.dbMode === 'oracle';
+    const identity = dbMode ? 'database' : ['hostip', 'report'].includes(options.identity) ? options.identity : 'host';
     const authIds = new Set((options.authPlugins || []).map(v => String(v).trim()).filter(Boolean));
     const out = options.format === 'xlsx'
       ? new XlsxOutput(sink, outCols, withSummary, options.findingsRows === 'fit')
@@ -2001,19 +2173,19 @@ function mergeWorkerMain() {
         };
 
         const cell = (row, k) => (fKey[k] === -1 ? '' : (row[fKey[k]] || '').trim());
-        // A report without a detectable SID stays separate per report rather
-        // than being merged with other databases on the same host.
-        const dbPart = row => cell(row, 'database') || '#' + fi;
+        // A database whose name couldn't be found stays separate per report
+        // and port rather than being merged with others on the same host.
+        const dbPart = row => cell(row, 'database').toUpperCase() || '#' + fi + ':' + cell(row, 'port');
         const targetKey = row => {
           const host = cell(row, 'host');
           if (identity === 'hostip') return host + '\x1f' + cell(row, 'ip');
           if (identity === 'report') return host + '\x1f' + fi;
-          if (identity === 'database') return host + '\x1f' + cell(row, 'ip') + '\x1f' + dbPart(row);
+          if (identity === 'database') return host + '\x1f' + cell(row, 'ip') + '\x1f' + cell(row, 'dbtype') + '\x1f' + dbPart(row);
           return host;
         };
         const targetInfo = row => ({
           host: cell(row, 'host'), ip: cell(row, 'ip'), fqdn: cell(row, 'fqdn'), os: cell(row, 'os'), report: src.name,
-          db: cell(row, 'database'),
+          db: cell(row, 'database'), dbType: cell(row, 'dbtype'), port: cell(row, 'port'),
         });
 
         const handleRow = row => {
@@ -2073,7 +2245,7 @@ function mergeWorkerMain() {
             } else {
               // Exact duplicate: compare the whole source row (within the
               // report only, when each report is its own target).
-              key = (identity === 'report' ? fi + '\x1e' : identity === 'database' ? dbPart(row) + '\x1e' : '') + row.join('\x1f');
+              key = (identity === 'report' ? fi + '\x1e' : identity === 'database' ? cell(row, 'dbtype') + '\x1f' + dbPart(row) + '\x1e' : '') + row.join('\x1f');
             }
             const [a, b] = hash64(key);
             if (!seen.add(a, b)) { stats.duplicates++; return; }
@@ -2120,12 +2292,11 @@ function mergeWorkerMain() {
 
         let parser;
         if (src.kind === 'nessus') {
-          setHeaders(oracleMode ? NESSUS_COLUMNS.concat(['Database']) : NESSUS_COLUMNS);
+          setHeaders(dbMode ? NESSUS_COLUMNS.concat(['Database Type', 'Database']) : NESSUS_COLUMNS);
           parser = new NessusStreamParser(row => {
-            if (oracleMode) row.push(parser.database);
             fillCompliance(row);
             return handleRow(row);
-          });
+          }, { withDb: dbMode });
         } else {
           let rawCols = 0;
           let derive = false;
@@ -2173,7 +2344,10 @@ function mergeWorkerMain() {
           stats.error = String(err && err.message || err);
         }
         bytesDone += sourceBytes(src) - consumed; // keep progress exact if a source stopped early
-        if (src.kind === 'nessus' && parser.databases) stats.databases = parser.database;
+        if (src.kind === 'nessus' && parser.found) {
+          stats.databases = [...new Set([...parser.databases, ...parser.found.names])].join(', ');
+          stats.dbTypes = [...new Set([...parser.policyTypes, ...parser.found.types])].join(', ');
+        }
 
         await out.flush();
         for (const k of Object.keys(totals)) totals[k] += stats[k];

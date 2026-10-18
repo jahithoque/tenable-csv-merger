@@ -32,6 +32,8 @@ const W = loadWorker();
 const { CsvStreamParser, NessusStreamParser, ZipWriter, OutputSink, listZip, textChunks } = W.internals;
 
 const csvFile = (name, text) => new File([text], name);
+let NESSUS_HEADERS = null;
+const NESSUS_COLUMNS_FOR_TESTS = () => NESSUS_HEADERS;
 const csvSource = (name, text, extra = {}) => ({ file: csvFile(name, text), kind: 'csv', name, ...extra });
 const nessusSource = (name, text) => ({ file: new File([text], name), kind: 'nessus', name });
 const parseCsv = text => { const rows = []; const p = new CsvStreamParser(r => { rows.push(r); }); p.push(text); p.end(); return rows; };
@@ -131,6 +133,7 @@ line2]]></plugin_output><risk_factor>Medium</risk_factor><xref>CWE:295</xref><xr
 </ReportHost></Report></NessusClientData_v2>`;
 {
   const ref = []; const p = new NessusStreamParser(r => { ref.push(r); }); p.push(NESSUS); p.end();
+  NESSUS_HEADERS = (await W.send({ type: 'scan', files: [{ id: 0, file: new File([NESSUS], 'x.nessus') }] }))[0].headers;
   eq(ref.length, 4, 'one row per CVE plus other findings');
   eq([ref[0][0], ref[0][1], ref[0][3], ref[0][4], ref[1][1]], ['51192', 'CVE-1', 'Medium', '10.0.0.5', 'CVE-2'], 'core columns');
   eq(ref[0][9], "The server's cert <x>.", 'entities decoded');
@@ -187,7 +190,7 @@ section('.xlsx output');
   eq(/<autoFilter ref="A1:[A-Z]+5"\/>/.test(f), true, 'filter covers header + 4 rows');
   eq(/<c:chart /.test(x.parts['xl/drawings/drawing1.xml']), true, 'dashboard chart present');
   const dash = cellTexts(x.sheets.Dashboard).join('|');
-  eq(['Vulnerabilities by severity', '% of findings', 'Tenable Report'].every(t => dash.includes(t)), true, 'dashboard labels keep their spaces');
+  eq(['Vulnerabilities by severity', '% of findings', 'Database Compliance'].every(t => dash.includes(t)), true, 'dashboard labels keep their spaces');
   // Sheet rollover + per-cell truncation, with a tiny row limit.
   const tiny = loadWorker(SOURCE.replace('const XLSX_MAX_ROWS = 1048575;', 'const XLSX_MAX_ROWS = 1000;'));
   const big = 'Plugin ID,Host,Plugin Output\n' + Array.from({ length: 3000 }, (_, i) => `${i},h${i},"${i === 5 ? 'x'.repeat(40000) : 'o'}"`).join('\n') + '\n';
@@ -251,11 +254,73 @@ section('Oracle databases (SID from the scan policy)');
   const x = await readXlsx(d.blob);
   eq(x.names.includes('Databases'), true, 'Databases sheet');
   const dbs = cellTexts(x.sheets.Databases);
-  eq(['lereg', 'finprd', '(unknown)'].every(v => dbs.includes(v)), true, 'Databases sheet names each SID');
+  eq(['lereg', 'finprd', '(unnamed, port 1521)', 'Oracle'].every(v => dbs.includes(v)), true, 'Databases sheet names each SID and type');
   const everything = Object.values(x.parts).join('');
   eq([everything.includes('S3cretPassw0rd'), everything.includes('audit_ro')], [false, false], 'scan-policy login/password never written');
   d = await merge([sources[0], { ...sources[0], name: 'copy.nessus' }], cols, { ...base, format: 'csv', dbMode: 'oracle', dedupe: 'exact' });
   eq(d.stats.duplicates, 2, 'the same database reported twice is still de-duplicated');
+}
+
+// ---------------------------------------------------------------------------
+section('SQL Server instances (one scan, several instances per host)');
+{
+  // Host sql01: instance SALES on 1433, instance HR on 1434. Only the
+  // "sysadmin users" check names the instance; the other checks are
+  // identical on both instances. Descriptions mention a placeholder that
+  // must not be taken for an instance. Host sql02: default instance only,
+  // one row on port 0. Host sql03: two instances on the same port.
+  const item = (port, check, res, output = '') => `<ReportItem port="${port}" svc_name="mssql" protocol="tcp" severity="${res === 'PASSED' ? 0 : 3}" pluginID="33814" pluginName="Database Compliance Checks" pluginFamily="Policy Compliance">` +
+    `<description>"${check}": [${res}] Applies to MSSQL$InstanceName services.</description><cm:compliance-check-name>${check}</cm:compliance-check-name>` +
+    `<cm:compliance-result>${res}</cm:compliance-result>${output ? `<cm:compliance-actual-value>${output}</cm:compliance-actual-value>` : ''}<risk_factor>None</risk_factor></ReportItem>`;
+  const sysadmins = acct => ` ["sa","SQL_LOGIN"]\n ["NT SERVICE\\\\${acct}","WINDOWS_LOGIN"]\n ["NT AUTHORITY\\\\SYSTEM","WINDOWS_LOGIN"]`;
+  const host = (name, ip, items) => `<ReportHost name="${name}"><HostProperties><tag name="host-ip">${ip}</tag></HostProperties>${items.join('')}</ReportHost>`;
+  const xml = `<?xml version="1.0" ?><NessusClientData_v2 xmlns:cm="http://www.nessus.org/cm"><Policy><Preferences><PluginsPreferences></PluginsPreferences></Preferences></Policy><Report name="SQL all" xmlns:cm="http://www.nessus.org/cm">` +
+    host('sql01', '10.6.0.1', [
+      item(1433, '2.1 Ensure xp_cmdshell disabled', 'PASSED'), item(1433, '3.1 Sysadmin users', 'FAILED', sysadmins('MSSQL$SALES')),
+      item(1433, '4.1 Ensure CLR disabled', 'FAILED'),
+      item(1434, '2.1 Ensure xp_cmdshell disabled', 'PASSED'), item(1434, '3.1 Sysadmin users', 'FAILED', sysadmins('MSSQL$HR')),
+      item(1434, '4.1 Ensure CLR disabled', 'FAILED')]) +
+    host('sql02', '10.6.0.2', [item(1433, '3.1 Sysadmin users', 'FAILED', sysadmins('MSSQLSERVER')), item(0, '5.1 OS audit setting', 'PASSED')]) +
+    host('sql03', '10.6.0.3', [item(1433, '3.1 Sysadmin users', 'FAILED', sysadmins('MSSQL$A') + sysadmins('MSSQL$B')), item(1433, '2.1 Ensure xp_cmdshell disabled', 'PASSED')]) +
+    // sql04: instances FIN and OPS share port 1433; each audit run lists every check once.
+    host('sql04', '10.6.0.4', [
+      item(1433, '2.1 Ensure xp_cmdshell disabled', 'PASSED'), item(1433, '3.1 Sysadmin users', 'FAILED', sysadmins('MSSQL$FIN')), item(1433, '4.1 Ensure CLR disabled', 'FAILED'),
+      item(1433, '2.1 Ensure xp_cmdshell disabled', 'PASSED'), item(1433, '3.1 Sysadmin users', 'FAILED', sysadmins('MSSQL$OPS')), item(1433, '4.1 Ensure CLR disabled', 'PASSED')]) +
+    '</Report></NessusClientData_v2>';
+  const src = nessusSource('sql_all.nessus', xml);
+  const [scan] = await W.send({ type: 'scan', files: [{ id: 1, file: src.file }] });
+  eq(scan.dbType, 'Microsoft SQL Server', 'scan: type detected from the service name');
+  const cols = [...scan.headers, 'Database Type', 'Database'];
+  const opts = { format: 'xlsx', mode: 'compliance', addSource: false };
+  let d = await merge([src], cols, { ...opts, dbMode: 'none', identity: 'host', dedupe: 'key' });
+  const lostWithout = d.stats.duplicates;
+  eq(d.stats.uniqueHosts, 4, 'without identification: instances counted as hosts, not databases');
+  eq(lostWithout, 3, 'without identification: the second instance\'s rows on a shared port are removed, even a differing result (the reported problem)');
+  d = await merge([src], cols, { ...opts, dbMode: 'auto', dedupe: 'key' });
+  eq([d.stats.duplicates, d.stats.uniqueHosts, d.stats.compliance], [0, 6, [7, 9, 0, 0]], 'instances kept apart: SALES, HR, MSSQLSERVER, A / B, FIN, OPS');
+  const x = await readXlsx(d.blob);
+  const f = x.sheets.Findings;
+  const rowsOf = name => (f.match(new RegExp(`>${name.replace(/[$/]/g, '\\$&')}<`, 'g')) || []).length;
+  eq([rowsOf('SALES'), rowsOf('HR'), rowsOf('MSSQLSERVER')], [3, 3, 2], 'instance applied to every row on its port (and port 0 on a single-instance host)');
+  eq([rowsOf('FIN'), rowsOf('OPS')], [3, 3], 'shared port: each audit run gets its own instance');
+  eq(cellTexts(x.sheets.Databases).includes('A / B'), true, 'two instances on one port shown as such, not guessed');
+  eq(cellTexts(x.sheets.Databases).includes('InstanceName'), false, 'placeholder text in descriptions ignored');
+  eq(cellTexts(x.sheets.Sources).some(t => /HR/.test(t) && /SALES/.test(t)), true, 'Sources lists the instances found');
+}
+
+section('other database types');
+{
+  const one = (svc, port, policyType) => `<?xml version="1.0" ?><NessusClientData_v2 xmlns:cm="http://www.nessus.org/cm"><Policy><Preferences><PluginsPreferences>` +
+    (policyType ? `<item><pluginName>Database settings</pluginName><pluginId>33815</pluginId><fullName>x</fullName><preferenceName>DB Type :</preferenceName><preferenceType>radio</preferenceType><preferenceValues></preferenceValues><selectedValue>${policyType}</selectedValue></item>` : '') +
+    `</PluginsPreferences></Preferences></Policy><Report name="r" xmlns:cm="http://www.nessus.org/cm"><ReportHost name="h1"><HostProperties><tag name="host-ip">10.7.0.1</tag></HostProperties>` +
+    `<ReportItem port="${port}" svc_name="${svc}" protocol="tcp" severity="0" pluginID="33814" pluginName="Database Compliance Checks" pluginFamily="Policy Compliance"><cm:compliance-check-name>1.1 c</cm:compliance-check-name><cm:compliance-result>PASSED</cm:compliance-result><risk_factor>None</risk_factor></ReportItem>` +
+    '</ReportHost></Report></NessusClientData_v2>';
+  const cases = [['db2.nessus', one('db2', 50000)], ['mysql.nessus', one('www', 3306)], ['pg.nessus', one('unknown', 9999, 'PostgreSQL')], ['mongo.nessus', one('mongodb', 27017)]];
+  const sources = cases.map(([n, t]) => nessusSource(n, t));
+  const d = await merge(sources, [...NESSUS_COLUMNS_FOR_TESTS(), 'Database Type', 'Database'], { format: 'xlsx', mode: 'compliance', dbMode: 'auto', dedupe: 'key' });
+  const types = cellTexts((await readXlsx(d.blob)).sheets.Databases);
+  eq(['IBM DB2', 'MySQL', 'PostgreSQL', 'MongoDB'].every(t => types.includes(t)), true, 'DB2 (service), MySQL (port), PostgreSQL (policy), MongoDB (service)');
+  eq(d.stats.uniqueHosts, 4, 'same host and IP, four databases');
 }
 
 // ---------------------------------------------------------------------------
