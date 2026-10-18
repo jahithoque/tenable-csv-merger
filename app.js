@@ -4,7 +4,7 @@
 
   // Shown in the page header and stamped on every workbook's dashboard, so a
   // report can be traced to the build that produced it.
-  const APP_VERSION = '2026.10.18-2';
+  const APP_VERSION = '2026.10.18-3';
   const EXCEL_MAX_ROWS = 1048575; // 1,048,576 minus the header row
   const SEVERITY_ORDER = [
     ['critical', 'Critical', 'var(--sev-critical)'],
@@ -295,7 +295,7 @@
         names.length === 1 ? ` \u00b7 ${names[0]}`
           : names.length > 1 ? ` \u00b7 several databases: ${names.join(', ')}`
             : mssql ? ' \u00b7 instances identified while merging'
-              : ' \u00b7 no database name in scan policy (kept apart by port and report)');
+              : ' \u00b7 no database name in scan policy (kept apart per report)');
     } else { cls = 'ok'; text = 'Ready'; }
     st.innerHTML = '';
     const span = document.createElement('span');
@@ -1045,8 +1045,9 @@
     none: 'Rows are grouped by the Target identity below (for non-database scans).',
     auto: 'Every row gets a Database Type and Database. Names come from the scan policy (Oracle SID, service or database name) or, for ' +
       'SQL Server, from the instance service accounts the checks print (NT SERVICE\\MSSQL$<instance>), mapped to every row on that ' +
-      'host and port. Each database is reported separately and duplicates are only compared within one database. Works for Oracle, ' +
-      'SQL Server, DB2, MySQL, PostgreSQL, MongoDB and others; databases without a name are kept apart by port and report.',
+      'host (compliance checks are local checks on port 0, so each instance\u2019s audit run is matched to the instance it names). Each ' +
+      'database is reported separately; duplicates are only removed when a later report repeats an earlier one. Works for Oracle, ' +
+      'SQL Server, DB2, MySQL, PostgreSQL, MongoDB and others; databases without a name are kept apart per report.',
   };
   function dbScanMode() {
     const r = document.querySelector('input[name="dbscan"]:checked');

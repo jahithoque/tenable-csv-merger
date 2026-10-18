@@ -8,7 +8,7 @@ function mergeWorkerMain() {
   'use strict';
 
   // Must match APP_VERSION in app.js; the page warns when files are mixed.
-  const WORKER_VERSION = '2026.10.18-2';
+  const WORKER_VERSION = '2026.10.18-3';
 
   const READ_CHUNK = 4 * 1024 * 1024;        // bytes per file read
   const PROBE_CHUNK = 256 * 1024;            // bytes per read when sniffing headers
@@ -135,6 +135,18 @@ function mergeWorkerMain() {
       this.mask = this.cap - 1;
       this.table = new Uint32Array(this.cap * 2);
       this.size = 0;
+    }
+
+    has(a, b) {
+      if (a === 0 && b === 0) b = 1;
+      let slot = (a ^ Math.imul(b, 0x9e3779b1)) & this.mask;
+      for (;;) {
+        const p = slot * 2;
+        const ta = this.table[p], tb = this.table[p + 1];
+        if (ta === 0 && tb === 0) return false;
+        if (ta === a && tb === b) return true;
+        slot = (slot + 1) & this.mask;
+      }
     }
 
     // Returns true if the key was newly added, false if already present.
@@ -698,7 +710,19 @@ function mergeWorkerMain() {
         }
         items.push([attrs, body]);
       }
-      if (this.withDb) host.instanceFor = this.learnInstances(items);
+      if (this.withDb) {
+        host.instanceFor = this.learnInstances(items);
+        // Local checks report port 0 and often a generic service, so the type
+        // seen on any of the host's rows (audit file, service, a real port on
+        // e.g. the authentication row) applies to the whole host.
+        const counts = new Map();
+        for (const [attrs, body] of items) {
+          const audit = (/<cm:compliance-audit-file>([\s\S]*?)<\/cm:compliance-audit-file>/.exec(body) || [])[1];
+          const t = dbTypeOf(audit, attrs.svc_name, attrs.pluginName) || dbTypeOfPort(attrs.port || '');
+          if (t) counts.set(t, (counts.get(t) || 0) + 1);
+        }
+        host.dbType = [...counts].sort((x, y) => y[1] - x[1]).map(([t]) => t)[0] || '';
+      }
       for (let k = 0; k < items.length; k++) {
         if (this.item(host, items[k][0], items[k][1], k) === false) { this.stopped = true; return; }
       }
@@ -707,9 +731,10 @@ function mergeWorkerMain() {
     // A host's results arrive together, so SQL Server instance names printed
     // by some checks can be applied to the other rows of the same instance:
     //  - per port: every row on a port gets the instance named on that port;
-    //  - shared port: the audit runs once per instance, so a repeated check
-    //    name on the same port starts the next instance's run, and each run
-    //    gets the instance its own checks name.
+    //  - shared port (compliance checks are local checks on port 0): the
+    //    audit runs once per instance, so the run's first check coming round
+    //    again starts the next instance's run, and each run gets the instance
+    //    its own checks name - only when runs and names match one-to-one.
     // Anything that can't be told apart is shown as "A / B", never guessed.
     learnInstances(items) {
       const display = new Map();
@@ -750,16 +775,19 @@ function mergeWorkerMain() {
         let run = null;
         info.forEach((it, idx) => {
           if (it.port !== port) return;
-          if (!run || (it.check && run.checks.has(it.check))) { run = { checks: new Set(), names: new Map(), idx: [] }; runs.push(run); }
-          if (it.check) run.checks.add(it.check);
+          // A run ends when its first check comes round again (checks that
+          // repeat inside one instance's audit don't start a new run).
+          if (!run || (it.check && it.check === run.first)) { run = { first: it.check, names: new Map(), idx: [] }; runs.push(run); }
+          if (!run.first) run.first = it.check;
           add(run.names, it.names);
           run.idx.push(idx);
         });
-        if (runs.length < 2) continue; // one run naming several instances: can't split
-        for (const r of runs) {
-          const name = best(r.names);
-          if (name && !name.includes(' / ')) for (const idx of r.idx) perItem[idx] = name;
-        }
+        // Apply runs only when they line up one-to-one with the instance names
+        // found; anything else could mislabel rows, so it stays "A / B".
+        if (runs.length < 2 || runs.length !== counts.size) continue;
+        const named = runs.map(r => (r.names.size === 1 ? [...r.names.keys()][0] : null));
+        if (named.includes(null) || new Set(named).size !== runs.length) continue;
+        runs.forEach((r, k) => { for (const idx of r.idx) perItem[idx] = display.get(named[k]); });
       }
       return (port, idx) => {
         if (idx !== undefined && perItem[idx]) return perItem[idx];
@@ -775,8 +803,8 @@ function mergeWorkerMain() {
       const instance = host.instanceFor ? host.instanceFor(port, idx) : '';
       const name = instance || this.policyName;
       const type = [...this.policyTypes][0] ||
-        dbTypeOf(a.svc_name, f['cm:compliance-audit-file'] && f['cm:compliance-audit-file'][0], a.pluginName) ||
-        (instance ? 'Microsoft SQL Server' : '') || dbTypeOfPort(port);
+        dbTypeOf(f['cm:compliance-audit-file'] && f['cm:compliance-audit-file'][0], a.svc_name, a.pluginName) ||
+        host.dbType || (instance ? 'Microsoft SQL Server' : '') || dbTypeOfPort(port);
       if (type) this.found.types.add(type);
       if (name) this.found.names.add(name);
       return [type, name];
@@ -2139,6 +2167,11 @@ function mergeWorkerMain() {
     let bytesDone = 0;
     let lastProgress = 0;
     const seen = options.dedupe === 'none' ? null : new HashSet64();
+    // Database mode: rows identical within one report come from different
+    // databases (or per-database checks) that can't always be told apart, so
+    // only rows repeating an earlier report (the same database scanned
+    // twice) are removed. Keys join `seen` after each report.
+    const pendingKeys = [];
     const agg = new SummaryCollector();
     const severity = Object.create(null); // vulnerability rows by Risk label, for the page
     const totals = { rowsIn: 0, rowsOut: 0, duplicates: 0, filtered: 0, excluded: 0, auth: 0, malformed: 0 };
@@ -2174,8 +2207,9 @@ function mergeWorkerMain() {
 
         const cell = (row, k) => (fKey[k] === -1 ? '' : (row[fKey[k]] || '').trim());
         // A database whose name couldn't be found stays separate per report
-        // and port rather than being merged with others on the same host.
-        const dbPart = row => cell(row, 'database').toUpperCase() || '#' + fi + ':' + cell(row, 'port');
+        // rather than being merged with others on the same host. (Not per
+        // port: compliance checks are port 0, only the auth row has a port.)
+        const dbPart = row => cell(row, 'database').toUpperCase() || '#' + fi;
         const targetKey = row => {
           const host = cell(row, 'host');
           if (identity === 'hostip') return host + '\x1f' + cell(row, 'ip');
@@ -2248,7 +2282,10 @@ function mergeWorkerMain() {
               key = (identity === 'report' ? fi + '\x1e' : identity === 'database' ? cell(row, 'dbtype') + '\x1f' + dbPart(row) + '\x1e' : '') + row.join('\x1f');
             }
             const [a, b] = hash64(key);
-            if (!seen.add(a, b)) { stats.duplicates++; return; }
+            if (identity === 'database') {
+              if (seen.has(a, b)) { stats.duplicates++; return; }
+              pendingKeys.push(a, b);
+            } else if (!seen.add(a, b)) { stats.duplicates++; return; }
           }
 
           const values = blank.slice();
@@ -2350,6 +2387,8 @@ function mergeWorkerMain() {
         }
 
         await out.flush();
+        for (let k = 0; k < pendingKeys.length; k += 2) seen.add(pendingKeys[k], pendingKeys[k + 1]);
+        pendingKeys.length = 0;
         for (const k of Object.keys(totals)) totals[k] += stats[k];
         perFile.push(stats);
         self.postMessage({ type: 'fileDone', fileIndex: fi, stats });

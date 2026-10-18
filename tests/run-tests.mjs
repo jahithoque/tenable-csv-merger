@@ -264,48 +264,75 @@ section('Oracle databases (SID from the scan policy)');
 // ---------------------------------------------------------------------------
 section('SQL Server instances (one scan, several instances per host)');
 {
-  // Host sql01: instance SALES on 1433, instance HR on 1434. Only the
-  // "sysadmin users" check names the instance; the other checks are
-  // identical on both instances. Descriptions mention a placeholder that
-  // must not be taken for an instance. Host sql02: default instance only,
-  // one row on port 0. Host sql03: two instances on the same port.
-  const item = (port, check, res, output = '') => `<ReportItem port="${port}" svc_name="mssql" protocol="tcp" severity="${res === 'PASSED' ? 0 : 3}" pluginID="33814" pluginName="Database Compliance Checks" pluginFamily="Policy Compliance">` +
+  // Real layout: compliance checks are local checks on port 0; only the
+  // authentication plugin (104410) carries the database port. Only the
+  // "sysadmin users" check names the instance. Descriptions mention a
+  // placeholder that must not be taken for an instance.
+  //  sql01: SALES and HR, each audit run starts with 1.1; check 2.3 repeats
+  //         inside an instance's run (one result per database).
+  //  sql02: default instance only.
+  //  sql03: one check names two instances, single run -> "A / B".
+  //  sql05: auth failure on port 1433 only.
+  const item = (port, check, res, output = '', svc = 'general') => `<ReportItem port="${port}" svc_name="${svc}" protocol="tcp" severity="${res === 'PASSED' ? 0 : 3}" pluginID="33814" pluginName="Database Compliance Checks" pluginFamily="Policy Compliance">` +
     `<description>"${check}": [${res}] Applies to MSSQL$InstanceName services.</description><cm:compliance-check-name>${check}</cm:compliance-check-name>` +
-    `<cm:compliance-result>${res}</cm:compliance-result>${output ? `<cm:compliance-actual-value>${output}</cm:compliance-actual-value>` : ''}<risk_factor>None</risk_factor></ReportItem>`;
+    `<cm:compliance-result>${res}</cm:compliance-result>${output ? `<cm:compliance-actual-value>${output}</cm:compliance-actual-value>` : ''}` +
+    `<cm:compliance-audit-file>CIS_MSSQL_2016_Database_L1.audit</cm:compliance-audit-file><risk_factor>None</risk_factor></ReportItem>`;
   const sysadmins = acct => ` ["sa","SQL_LOGIN"]\n ["NT SERVICE\\\\${acct}","WINDOWS_LOGIN"]\n ["NT AUTHORITY\\\\SYSTEM","WINDOWS_LOGIN"]`;
+  const authItem = port => `<ReportItem port="${port}" svc_name="mssql" protocol="tcp" severity="0" pluginID="104410" pluginName="Target Credential Status by Authentication Protocol - Failure for Provided Credentials" pluginFamily="Settings"><plugin_output>Nessus was unable to log into the following host :\n\n  Protocol        : MSSQL\n  Port            : ${port}\n  User            : 'scan'\n  Error           : Login failed\n</plugin_output><risk_factor>None</risk_factor></ReportItem>`;
   const host = (name, ip, items) => `<ReportHost name="${name}"><HostProperties><tag name="host-ip">${ip}</tag></HostProperties>${items.join('')}</ReportHost>`;
+  const run = (name, results) => [
+    item(0, '1.1 Ensure xp_cmdshell disabled', results[0]),
+    item(0, '2.3 Ensure TRUSTWORTHY is off', results[1]), item(0, '2.3 Ensure TRUSTWORTHY is off', results[1]),
+    item(0, '3.1 Sysadmin users', 'FAILED', sysadmins(name)), item(0, '4.1 Ensure CLR disabled', results[2])];
   const xml = `<?xml version="1.0" ?><NessusClientData_v2 xmlns:cm="http://www.nessus.org/cm"><Policy><Preferences><PluginsPreferences></PluginsPreferences></Preferences></Policy><Report name="SQL all" xmlns:cm="http://www.nessus.org/cm">` +
-    host('sql01', '10.6.0.1', [
-      item(1433, '2.1 Ensure xp_cmdshell disabled', 'PASSED'), item(1433, '3.1 Sysadmin users', 'FAILED', sysadmins('MSSQL$SALES')),
-      item(1433, '4.1 Ensure CLR disabled', 'FAILED'),
-      item(1434, '2.1 Ensure xp_cmdshell disabled', 'PASSED'), item(1434, '3.1 Sysadmin users', 'FAILED', sysadmins('MSSQL$HR')),
-      item(1434, '4.1 Ensure CLR disabled', 'FAILED')]) +
-    host('sql02', '10.6.0.2', [item(1433, '3.1 Sysadmin users', 'FAILED', sysadmins('MSSQLSERVER')), item(0, '5.1 OS audit setting', 'PASSED')]) +
-    host('sql03', '10.6.0.3', [item(1433, '3.1 Sysadmin users', 'FAILED', sysadmins('MSSQL$A') + sysadmins('MSSQL$B')), item(1433, '2.1 Ensure xp_cmdshell disabled', 'PASSED')]) +
-    // sql04: instances FIN and OPS share port 1433; each audit run lists every check once.
-    host('sql04', '10.6.0.4', [
-      item(1433, '2.1 Ensure xp_cmdshell disabled', 'PASSED'), item(1433, '3.1 Sysadmin users', 'FAILED', sysadmins('MSSQL$FIN')), item(1433, '4.1 Ensure CLR disabled', 'FAILED'),
-      item(1433, '2.1 Ensure xp_cmdshell disabled', 'PASSED'), item(1433, '3.1 Sysadmin users', 'FAILED', sysadmins('MSSQL$OPS')), item(1433, '4.1 Ensure CLR disabled', 'PASSED')]) +
+    host('sql01', '10.6.0.1', [...run('MSSQL$SALES', ['PASSED', 'FAILED', 'FAILED']), ...run('MSSQL$HR', ['PASSED', 'FAILED', 'PASSED'])]) +
+    host('sql02', '10.6.0.2', [item(0, '3.1 Sysadmin users', 'FAILED', sysadmins('MSSQLSERVER')), item(0, '5.1 OS audit setting', 'PASSED')]) +
+    host('sql03', '10.6.0.3', [item(0, '3.1 Sysadmin users', 'FAILED', sysadmins('MSSQL$A') + sysadmins('MSSQL$B')), item(0, '2.1 Ensure xp_cmdshell disabled', 'PASSED')]) +
+    host('sql05', '10.6.0.5', [authItem(1433)]) +
     '</Report></NessusClientData_v2>';
   const src = nessusSource('sql_all.nessus', xml);
   const [scan] = await W.send({ type: 'scan', files: [{ id: 1, file: src.file }] });
-  eq(scan.dbType, 'Microsoft SQL Server', 'scan: type detected from the service name');
+  eq(scan.dbType, 'Microsoft SQL Server', 'scan: type detected (audit file / instance accounts)');
   const cols = [...scan.headers, 'Database Type', 'Database'];
-  const opts = { format: 'xlsx', mode: 'compliance', addSource: false };
+  const opts = { format: 'xlsx', mode: 'compliance', addSource: false, authPlugins: ['104410'] };
   let d = await merge([src], cols, { ...opts, dbMode: 'none', identity: 'host', dedupe: 'key' });
-  const lostWithout = d.stats.duplicates;
-  eq(d.stats.uniqueHosts, 4, 'without identification: instances counted as hosts, not databases');
-  eq(lostWithout, 3, 'without identification: the second instance\'s rows on a shared port are removed, even a differing result (the reported problem)');
+  eq(d.stats.duplicates, 6, 'without identification: HR\'s rows (and per-database repeats) removed as duplicates of SALES - the reported problem');
   d = await merge([src], cols, { ...opts, dbMode: 'auto', dedupe: 'key' });
-  eq([d.stats.duplicates, d.stats.uniqueHosts, d.stats.compliance], [0, 6, [7, 9, 0, 0]], 'instances kept apart: SALES, HR, MSSQLSERVER, A / B, FIN, OPS');
+  eq([d.stats.duplicates, d.stats.compliance], [0, [5, 9, 0, 0]], 'database mode: nothing removed within the report');
   const x = await readXlsx(d.blob);
   const f = x.sheets.Findings;
   const rowsOf = name => (f.match(new RegExp(`>${name.replace(/[$/]/g, '\\$&')}<`, 'g')) || []).length;
-  eq([rowsOf('SALES'), rowsOf('HR'), rowsOf('MSSQLSERVER')], [3, 3, 2], 'instance applied to every row on its port (and port 0 on a single-instance host)');
-  eq([rowsOf('FIN'), rowsOf('OPS')], [3, 3], 'shared port: each audit run gets its own instance');
-  eq(cellTexts(x.sheets.Databases).includes('A / B'), true, 'two instances on one port shown as such, not guessed');
-  eq(cellTexts(x.sheets.Databases).includes('InstanceName'), false, 'placeholder text in descriptions ignored');
+  eq([rowsOf('SALES'), rowsOf('HR'), rowsOf('MSSQLSERVER')], [5, 5, 2], 'port-0 rows: each audit run gets its instance, repeats inside a run don\'t split it');
+  const dbs = cellTexts(x.sheets.Databases);
+  eq(dbs.includes('A / B'), true, 'two instances named in one run shown as such, not guessed');
+  eq(dbs.includes('InstanceName'), false, 'placeholder text in descriptions ignored');
+  eq(dbs.filter(t => t === 'Microsoft SQL Server').length >= 4, true, 'type applied host-wide to port-0 rows');
+  eq(d.stats.authHosts, 1, 'auth failure (port 1433) reported');
   eq(cellTexts(x.sheets.Sources).some(t => /HR/.test(t) && /SALES/.test(t)), true, 'Sources lists the instances found');
+  // Inconsistent runs (3 runs, 2 names) are not applied.
+  const bad = nessusSource('bad.nessus', xml.replace(host('sql02', '10.6.0.2', [item(0, '3.1 Sysadmin users', 'FAILED', sysadmins('MSSQLSERVER')), item(0, '5.1 OS audit setting', 'PASSED')]),
+    host('sql06', '10.6.0.6', [...run('MSSQL$X', ['PASSED', 'PASSED', 'PASSED']), ...run('MSSQL$Y', ['PASSED', 'PASSED', 'PASSED']), item(0, '1.1 Ensure xp_cmdshell disabled', 'PASSED')])));
+  d = await merge([bad], cols, { ...opts, dbMode: 'auto', dedupe: 'exact' });
+  eq(cellTexts((await readXlsx(d.blob)).sheets.Databases).includes('X / Y'), true, 'runs that don\'t match names one-to-one fall back to "X / Y"');
+}
+
+section('duplicates in database mode');
+{
+  const xml = rows => `<?xml version="1.0" ?><NessusClientData_v2 xmlns:cm="http://www.nessus.org/cm"><Report name="r" xmlns:cm="http://www.nessus.org/cm"><ReportHost name="my01"><HostProperties><tag name="host-ip">10.8.0.1</tag></HostProperties>` +
+    rows.map(r => `<ReportItem port="0" svc_name="general" protocol="tcp" severity="0" pluginID="33814" pluginName="Database Compliance Checks" pluginFamily="Policy Compliance"><cm:compliance-check-name>${r}</cm:compliance-check-name><cm:compliance-result>PASSED</cm:compliance-result><cm:compliance-audit-file>CIS_MySQL_8.audit</cm:compliance-audit-file><risk_factor>None</risk_factor></ReportItem>`).join('') +
+    '</ReportHost></Report></NessusClientData_v2>';
+  // Two unnamed MySQL databases in one scan give identical rows.
+  const one = nessusSource('mysql.nessus', xml(['1.1 a', '1.2 b', '1.1 a', '1.2 b']));
+  const cols = [...NESSUS_COLUMNS_FOR_TESTS(), 'Database Type', 'Database'];
+  for (const dedupe of ['exact', 'key']) {
+    const d = await merge([one], cols, { format: 'csv', mode: 'compliance', dbMode: 'auto', dedupe });
+    eq([d.stats.duplicates, d.stats.rowsOut], [0, 4], `${dedupe}: identical rows within one report are kept`);
+  }
+  const d = await merge([one, { ...one, name: 'mysql-again.nessus' }], cols, { format: 'csv', mode: 'compliance', dbMode: 'auto', dedupe: 'exact', addSource: false });
+  eq(d.stats.rowsOut, 8, 'unnamed databases in different reports are kept apart (cannot prove they are the same)');
+  const named = nessusSource('ora.nessus', `<?xml version="1.0" ?><NessusClientData_v2 xmlns:cm="http://www.nessus.org/cm"><Policy><Preferences><PluginsPreferences><item><pluginName>Database settings</pluginName><pluginId>33815</pluginId><fullName>x</fullName><preferenceName>Database SID :</preferenceName><preferenceType>entry</preferenceType><preferenceValues></preferenceValues><selectedValue>LEREG</selectedValue></item></PluginsPreferences></Preferences></Policy>` + xml(['1.1 a', '1.2 b']).slice(xml(['1.1 a']).indexOf('<Report ')));
+  const twice = await merge([named, { ...named, name: 'ora-again.nessus' }], cols, { format: 'csv', mode: 'compliance', dbMode: 'auto', dedupe: 'exact', addSource: false });
+  eq([twice.stats.duplicates, twice.stats.rowsOut], [2, 2], 'the same named database in a later report is de-duplicated');
 }
 
 section('other database types');

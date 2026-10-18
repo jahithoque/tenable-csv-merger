@@ -33,10 +33,12 @@ Every row gets a **Database Type** and a **Database**, and each database (host +
 | Source of the name | Used for |
 | --- | --- |
 | Scan policy *Database settings* (Database SID, service / database / instance name) | Scans of one database, e.g. Oracle (SID) |
-| SQL Server service accounts printed by the checks (`NT SERVICE\MSSQL$<instance>`, `SQLAgent$<instance>`, `MSSQLSERVER` = default instance) | One SQL Server scan covering several instances. A host's results are read together: the instance is applied to every row on its port; when instances share a port, each audit run (a repeated check starts the next instance's run) gets the instance it names |
-| None found | Kept apart by port and report, shown as *(unnamed, port N)* |
+| SQL Server service accounts printed by the checks (`NT SERVICE\MSSQL$<instance>`, `SQLAgent$<instance>`, `MSSQLSERVER` = default instance) | One SQL Server scan covering several instances. Compliance checks are local checks reported on port 0, so a host's results are read together: the audit runs once per instance, the run's first check coming round again starts the next instance's run, and each run gets the instance it names, only when runs and instance names match one-to-one |
+| None found | Kept apart per report, shown as *(unnamed)* |
 
-The type comes from the policy (*DB Type*), the service name, the audit file name or the port (1433, 1521, 50000, 3306, 5432, 27017, ...). Anything that can't be told apart is shown as `A / B`, never guessed.
+The type comes from the policy (*DB Type*), the audit file name, the service name or a real port (e.g. on the authentication row: 1433, 1521, 50000, 3306, 5432, 27017, ...) and applies to the whole host. Anything that can't be told apart is shown as `A / B`, never guessed.
+
+**Duplicates in database mode:** rows that are identical within one report come from different databases (or checks that repeat per database) and are always kept; only rows repeating an earlier report for the same named database (the same database scanned twice) are removed.
 
 The report list shows each file's detected type and database; the workbook adds a **Databases** sheet (type, name, ports, results, status), a **Databases by type** table on the dashboard, and the detected types and databases per file on **Sources**. Only database-identity preferences are read from the scan policy; logins and passwords are ignored and never written out. Choose **Off** for non-database scans.
 
