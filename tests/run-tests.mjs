@@ -234,6 +234,51 @@ section('compliance, auth failures, no-result targets');
 }
 
 // ---------------------------------------------------------------------------
+section('dashboard title, logo, layout; coloured compliance results');
+{
+  const h = 'Plugin ID,Risk,Host,IP Address,Protocol,Port,Name,Description,Plugin Output\n';
+  const src = csvSource('c.csv', h +
+    '1000001,None,db01,10.2.0.5,tcp,1521,"1.1 Ensure audit trail",d,\n' +
+    '1000001,High,db01,10.2.0.5,tcp,1521,"1.2 Ensure remote auth off",d,\n' +
+    '1000001,Medium,db01,10.2.0.5,tcp,1521,"1.3 Review manually",d,\n');
+  const cols = ['Plugin ID', 'Risk', 'Host', 'Name', 'Compliance Check', 'Compliance Result'];
+  const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'));
+  const base = { format: 'xlsx', mode: 'compliance', dedupe: 'none', summary: true };
+  let x = await readXlsx((await merge([src], cols, base)).blob);
+  const f = x.sheets.Findings;
+  const { ST } = W.internals;
+  const styled = v => new RegExp(`<c r="F\\d+" s="(\\d+)" t="inlineStr"><is><t xml:space="preserve">${v}</t>`).exec(f)?.[1];
+  eq([styled('PASSED'), styled('FAILED'), styled('WARNING')].map(Number), [ST.resPassed, ST.resFailed, ST.resWarning], 'Compliance Result cells coloured in Findings');
+  eq(['PASSED', 'Failed', 'WARNING', 'ERROR', 'SKIPPED', ''].map(W.internals.resultStyle),
+    [ST.resPassed, ST.resFailed, ST.resWarning, ST.resError, 0, 0], 'PASSED green, FAILED red, WARNING yellow, ERROR grey');
+  const styles = x.parts['xl/styles.xml'];
+  eq(['FF2E9E5B', 'FFC23B3B', 'FFFFD966', 'FFBFBFBF'].every(c => styles.includes(c)), true, 'result fills: green, red, yellow, grey');
+  let dash = x.sheets.Dashboard;
+  eq(/<c r="E1" s="2" t="inlineStr"><is><t xml:space="preserve">Database Compliance/.test(dash), true, 'default title, dashboard starts at column E');
+  eq(/<c r="[A-D]\d+"/.test(dash), false, 'columns A-D are an empty margin');
+  eq(/_xlnm.Print_Area" localSheetId="0">'Dashboard'!\$E\$1:\$L\$\d+</.test(x.parts['xl/workbook.xml']), true, 'print area is the grid only');
+  eq(/<c:f>'Dashboard'!\$E\$\d+:\$E\$\d+<\/c:f>/.test(x.parts['xl/charts/chart1.xml']), true, 'chart ranges follow the grid');
+  eq(Object.keys(x.parts).some(n => n.startsWith('xl/media/')), false, 'no logo: no media');
+
+  x = await readXlsx((await merge([src], cols, { ...base, reportTitle: '  ACME Bank \u2014 Q4 DB Audit ', logo: { ext: 'png', bytes: png, width: 400, height: 100 } })).blob);
+  dash = x.sheets.Dashboard;
+  const texts = cellTexts(dash);
+  eq(texts[0], 'ACME Bank \u2014 Q4 DB Audit', 'custom title');
+  eq(texts[1].startsWith('Database Compliance \u2014 Merged Summary \u00B7 Generated'), true, 'subtitle keeps the default name');
+  eq(/<row r="1" ht="66" customHeight="1">/.test(dash) && /<c r="E2" s="2"/.test(dash), true, 'logo row above the title');
+  eq(Buffer.from(x.parts['xl/media/image1.png'], 'latin1').subarray(1, 4).toString(), 'PNG', 'logo stored in xl/media');
+  eq(x.parts['[Content_Types].xml'].includes('<Default Extension="png" ContentType="image/png"/>'), true, 'png content type');
+  const drawing = x.parts['xl/drawings/drawing1.xml'];
+  eq([/<xdr:pic>/.test(drawing), /<c:chart /.test(drawing)], [true, true], 'logo and chart share the dashboard drawing');
+  const rid = /r:embed="(rId\d+)"/.exec(drawing)[1];
+  eq(new RegExp(`Id="${rid}" Type="[^"]+/image" Target="../media/image1.png"`).test(x.parts['xl/drawings/_rels/drawing1.xml.rels']), true, 'logo relationship');
+  const cx = +/<xdr:ext cx="(\d+)" cy="(\d+)"/.exec(drawing)[1], cy = +/<xdr:ext cx="(\d+)" cy="(\d+)"/.exec(drawing)[2];
+  eq(Math.round(cx / cy), 4, 'logo keeps its aspect ratio');
+  const csv = await merge([src], cols, { ...base, format: 'csv', logo: { ext: 'png', bytes: png, width: 1, height: 1 } });
+  eq(csv.stats.format, 'csv', 'logo ignored for CSV output');
+}
+
+// ---------------------------------------------------------------------------
 section('Oracle databases (SID from the scan policy)');
 {
   const policy = sid => '<Policy><Preferences><PluginsPreferences>' +

@@ -42,6 +42,13 @@ The type comes from the policy (*DB Type*), the audit file name, the service nam
 
 The report list shows each file's detected type and database; the workbook adds a **Databases** sheet (type, name, ports, results, status), a **Databases by type** table on the dashboard, and the detected types and databases per file on **Sources**. Only database-identity preferences are read from the scan policy; logins and passwords are ignored and never written out. Choose **Off** for non-database scans.
 
+### Dashboard title & logo
+
+Optional, Excel only, remembered in your browser:
+
+- **Report title** replaces the dashboard heading (the default *Database Compliance — Merged Summary* moves to the line below it).
+- **Company logo** is placed centred above the title. PNG, JPEG, GIF or SVG, up to 2 MB; an SVG is converted to a sharp PNG in the browser, so every Excel version (and LibreOffice) shows it.
+
 ### Target identity
 
 How rows are grouped into targets, for duplicate removal and every per-target count (Hosts/Targets sheet, top 10, pass rates, affected counts, authentication failures):
@@ -67,7 +74,7 @@ Inputs can be mixed freely; the output contains the union of all columns.
 
   | Sheet | Contents |
   | --- | --- |
-  | **Dashboard** | Overview, vulnerabilities by severity (with hosts affected), compliance results and **compliance score**, top 10 riskiest hosts, top 10 vulnerabilities, top 10 failed checks, plus a severity bar chart and compliance doughnut chart (native Excel charts) |
+  | **Dashboard** | Starts at column E so it opens near the middle of the screen (prints the content only, fit to A4 width). Optional logo and title, overview, vulnerabilities by severity (with hosts affected), compliance results and **compliance score**, top 10 riskiest hosts, top 10 vulnerabilities, top 10 failed checks, plus a severity bar chart and compliance doughnut chart (native Excel charts) |
   | **Hosts / Targets** | Per host or target: IP / FQDN / OS, Critical–Info counts, Passed / Failed / Warning checks, pass rate, and a Status (Results / Auth failed / No usable results) |
   | **Vulnerabilities** | Per plugin: severity, hosts affected, occurrences, CVEs |
   | **Compliance** | Per check: Passed / Failed / Warning counts and pass rate (when compliance results exist) |
@@ -75,6 +82,8 @@ Inputs can be mixed freely; the output contains the union of all columns.
   | **Auth Failures** | Hosts where Tenable could not log in (plugin 104410 by default): IP, FQDN, OS, auth protocol, port, user, domain, error, full plugin output, source report |
   | **Sources** | Per report: rows read / written, which Findings sheet holds its rows, duplicates, exclusions, auth failures, errors |
   | **Findings** | The merged rows |
+
+  In Findings, **Compliance Result** cells are colour-coded: PASSED green, FAILED red, WARNING yellow, ERROR grey.
 
   Text cells keep Tenable's line breaks (wrapped, so words at line ends never run together). **Findings rows**: *Compact* shows the first two lines of each finding (full text in the formula bar or by expanding the row); *Fit full text* lets Excel size every row to its content.
 

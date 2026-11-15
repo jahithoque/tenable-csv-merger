@@ -4,7 +4,7 @@
 
   // Shown in the page header and stamped on every workbook's dashboard, so a
   // report can be traced to the build that produced it.
-  const APP_VERSION = '2026.10.18-3';
+  const APP_VERSION = '2026.11.15-1';
   const EXCEL_MAX_ROWS = 1048575; // 1,048,576 minus the header row
   const SEVERITY_ORDER = [
     ['critical', 'Critical', 'var(--sev-critical)'],
@@ -26,6 +26,8 @@
     colCount: $('col-count'), colNote: $('col-note'), colChips: $('col-chips'), colSearch: $('col-search'),
     optSummary: $('opt-summary'), optSummaryWrap: $('opt-summary-wrap'), modeHelp: $('mode-help'), optAuth: $('opt-auth'),
     identityHelp: $('identity-help'), optRowsWrap: $('opt-rows-wrap'), dbscanHelp: $('dbscan-help'),
+    optBrandWrap: $('opt-brand-wrap'), optTitle: $('opt-title'), logoPreview: $('logo-preview'), logoPick: $('logo-pick'),
+    logoRemove: $('logo-remove'), logoName: $('logo-name'),
     mergeBtn: $('merge-btn'), mergeHint: $('merge-hint'),
     progressCard: $('progress-card'), progressTitle: $('progress-title'), progressBar: $('progress-bar'),
     progressFill: $('progress-fill'), progressPct: $('progress-pct'), progressDetail: $('progress-detail'),
@@ -51,6 +53,7 @@
     mergeWorker: null,
     resultUrl: null,
     rules: [],                // { id, column, op, text }
+    logo: null,               // { name, ext, mime, bytes, width, height } for the dashboard
     nextRuleId: 1,
   };
 
@@ -661,6 +664,7 @@
     el.optBomWrap.hidden = outputFormat() !== 'csv';
     el.optSummaryWrap.hidden = outputFormat() !== 'xlsx';
     el.optRowsWrap.hidden = outputFormat() !== 'xlsx';
+    el.optBrandWrap.hidden = outputFormat() !== 'xlsx';
     el.optName.value = outputName();
     clearResult();
   }
@@ -785,6 +789,8 @@
         dbMode: dbScanMode(),
         findingsRows: document.querySelector('input[name="rows"]:checked').value,
         authPlugins: authPluginIds(),
+        reportTitle: el.optTitle.value.trim(),
+        logo: state.logo ? { ext: state.logo.ext, bytes: state.logo.bytes, width: state.logo.width, height: state.logo.height } : null,
         bom: el.optBom.checked,
         rules: activeRules().map(r => ({ column: r.column, op: r.op, values: ruleValues(r) })),
       },
@@ -1086,6 +1092,117 @@
   } catch (_) { /* unavailable */ }
   el.optAuth.addEventListener('input', () => {
     try { localStorage.setItem(AUTH_STORAGE_KEY, el.optAuth.value); } catch (_) { /* unavailable */ }
+    clearResult();
+  });
+
+  // Dashboard title and company logo (Excel only), remembered in this browser.
+  const TITLE_STORAGE_KEY = 'tenable-merger.title.v1';
+  const LOGO_STORAGE_KEY = 'tenable-merger.logo.v1';
+  const LOGO_MAX_BYTES = 2 * 1024 * 1024;
+  try {
+    const saved = localStorage.getItem(TITLE_STORAGE_KEY);
+    if (saved !== null) el.optTitle.value = saved;
+  } catch (_) { /* unavailable */ }
+  el.optTitle.addEventListener('input', () => {
+    try { localStorage.setItem(TITLE_STORAGE_KEY, el.optTitle.value); } catch (_) { /* unavailable */ }
+    clearResult();
+  });
+
+  // Recognised by content, not file name: Excel embeds PNG, JPEG and GIF.
+  function imageKind(b) {
+    if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47) return { ext: 'png', mime: 'image/png' };
+    if (b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF) return { ext: 'jpeg', mime: 'image/jpeg' };
+    if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return { ext: 'gif', mime: 'image/gif' };
+    return null;
+  }
+  const toBase64 = bytes => {
+    let s = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(s);
+  };
+  const fromBase64 = b64 => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  function imageSize(bytes, mime) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+      const img = new Image();
+      img.onload = () => { URL.revokeObjectURL(url); resolve([img.naturalWidth, img.naturalHeight]); };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('unreadable image')); };
+      img.src = url;
+    });
+  }
+  function renderLogo(note) {
+    const logo = state.logo;
+    el.logoPreview.hidden = !logo;
+    el.logoRemove.hidden = !logo;
+    if (logo) el.logoPreview.src = `data:${logo.mime};base64,${toBase64(logo.bytes)}`;
+    else el.logoPreview.removeAttribute('src');
+    el.logoName.textContent = note || (logo ? `${logo.name} \u00B7 ${logo.width} \u00D7 ${logo.height} px` : 'No logo');
+  }
+  // Excel can't show SVG everywhere (older versions, LibreOffice), so an SVG
+  // logo is drawn onto a canvas and embedded as a sharp PNG instead.
+  async function svgToPng(bytes) {
+    const text = new TextDecoder().decode(bytes);
+    const url = URL.createObjectURL(new Blob([text], { type: 'image/svg+xml' }));
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const im = new Image();
+        im.onload = () => resolve(im);
+        im.onerror = () => reject(new Error('unreadable SVG'));
+        im.src = url;
+      });
+      // An SVG without width/height can report 0 x 0; fall back to its viewBox.
+      let w = img.naturalWidth, h = img.naturalHeight;
+      const vb = /viewBox\s*=\s*["']\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(text);
+      if ((!w || !h) && vb) { w = +vb[1]; h = +vb[2]; }
+      if (!w || !h) { w = 300; h = 150; }
+      // Rendered about 3x the size it is shown on the dashboard.
+      const scale = Math.min(240 / h, 1200 / w);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(w * scale));
+      canvas.height = Math.max(1, Math.round(h * scale));
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+      if (!blob) throw new Error('SVG could not be converted');
+      return new Uint8Array(await blob.arrayBuffer());
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+  async function setLogo(file) {
+    if (file.size > LOGO_MAX_BYTES) { renderLogo('That image is larger than 2 MB; please use a smaller logo.'); return; }
+    let bytes = new Uint8Array(await file.arrayBuffer());
+    let kind = imageKind(bytes);
+    if (!kind && /<svg[\s>]/i.test(new TextDecoder().decode(bytes.subarray(0, 4096)))) {
+      try { bytes = await svgToPng(bytes); } catch (_) { renderLogo('That SVG could not be converted to an image.'); return; }
+      kind = imageKind(bytes);
+    }
+    if (!kind) { renderLogo('Use a PNG, JPEG, GIF or SVG image.'); return; }
+    let size;
+    try { size = await imageSize(bytes, kind.mime); } catch (_) { renderLogo('That image could not be read.'); return; }
+    state.logo = { name: file.name, ...kind, bytes, width: size[0], height: size[1] };
+    let note = '';
+    try {
+      localStorage.setItem(LOGO_STORAGE_KEY, JSON.stringify({ ...state.logo, bytes: toBase64(bytes) }));
+    } catch (_) { note = `${file.name} \u00B7 used for this session (too large to remember in this browser)`; }
+    renderLogo(note);
+    clearResult();
+  }
+  try {
+    const saved = JSON.parse(localStorage.getItem(LOGO_STORAGE_KEY) || 'null');
+    if (saved && saved.bytes) state.logo = { ...saved, bytes: fromBase64(saved.bytes) };
+  } catch (_) { /* unavailable or damaged */ }
+  renderLogo();
+  el.logoPick.addEventListener('click', () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/png,image/jpeg,image/gif,image/svg+xml,.svg';
+    input.addEventListener('change', () => { if (input.files[0]) setLogo(input.files[0]); });
+    input.click();
+  });
+  el.logoRemove.addEventListener('click', () => {
+    state.logo = null;
+    try { localStorage.removeItem(LOGO_STORAGE_KEY); } catch (_) { /* unavailable */ }
+    renderLogo();
     clearResult();
   });
 

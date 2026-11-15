@@ -8,7 +8,7 @@ function mergeWorkerMain() {
   'use strict';
 
   // Must match APP_VERSION in app.js; the page warns when files are mixed.
-  const WORKER_VERSION = '2026.10.18-3';
+  const WORKER_VERSION = '2026.11.15-1';
 
   const READ_CHUNK = 4 * 1024 * 1024;        // bytes per file read
   const PROBE_CHUNK = 256 * 1024;            // bytes per read when sniffing headers
@@ -1056,9 +1056,9 @@ function mergeWorkerMain() {
     }
 
     // Small entry, stored uncompressed.
-    addFile(name, text) {
+    addFile(name, text) { // text: a string, or bytes stored as they are
       const nameBytes = this.enc.encode(name);
-      const data = this.enc.encode(text);
+      const data = typeof text === 'string' ? this.enc.encode(text) : text;
       const crc = crc32(0, data);
       const offset = this.offset;
       this.put(this.localHeader(nameBytes, 0x0800, 0, crc, data.length, data.length));
@@ -1208,7 +1208,18 @@ function mergeWorkerMain() {
     td: 16, tdNum: 17, tdBold: 18, tdNumBold: 19, tdPct: 20,
     kpiValue: 21, kpiLabel: 22, kpiBad: 23, kpiGood: 24, kpiPct: 25, subtitle: 26,
     cellText: 27, cellNum: 28,
+    resPassed: 29, resFailed: 30, resWarning: 31, resError: 32,
   };
+  // Findings "Compliance Result" cells: PASSED green, FAILED red, WARNING
+  // yellow, ERROR grey.
+  function resultStyle(v) {
+    const r = String(v).trim().toUpperCase();
+    if (r.startsWith('PASS')) return ST.resPassed;
+    if (r.startsWith('FAIL')) return ST.resFailed;
+    if (r.startsWith('WARN')) return ST.resWarning;
+    if (r.startsWith('ERR')) return ST.resError;
+    return 0;
+  }
   const SEVERITIES = [
     ['Critical', ST.critical, '91243E'], ['High', ST.high, 'DD4B50'], ['Medium', ST.medium, 'F18C43'],
     ['Low', ST.low, 'F8C851'], ['Info', ST.info, '67ACE1'], ['Other', ST.other, 'A6A6A6'],
@@ -1232,7 +1243,7 @@ function mergeWorkerMain() {
     const solid = rgb => `<fill><patternFill patternType="solid"><fgColor rgb="FF${rgb}"/><bgColor indexed="64"/></patternFill></fill>`;
     const fills = ['<fill><patternFill patternType="none"/></fill>', '<fill><patternFill patternType="gray125"/></fill>',
       solid('D9E1F2'), solid('91243E'), solid('DD4B50'), solid('F18C43'), solid('F8C851'), solid('67ACE1'),
-      solid('2E9E5B'), solid('C23B3B'), solid('F0A030'), solid('D9D9D9'), solid('F2F5FA')];
+      solid('2E9E5B'), solid('C23B3B'), solid('F0A030'), solid('D9D9D9'), solid('F2F5FA'), solid('FFD966'), solid('BFBFBF')];
     const side = (name, rgb) => (rgb ? `<${name} style="thin"><color rgb="FF${rgb}"/></${name}>` : `<${name}/>`);
     const border = (l, r, t, b, rgb) =>
       `<border>${side('left', l && rgb)}${side('right', r && rgb)}${side('top', t && rgb)}${side('bottom', b && rgb)}<diagonal/></border>`;
@@ -1247,7 +1258,7 @@ function mergeWorkerMain() {
     const xfs = [
       xf({ v: 'bottom' }),                                              // 0 default
       xf({ font: 1, fill: 2, bd: 1, h: 'center', wrap: true }),         // 1 header
-      xf({ font: 2, h: 'center' }),                                     // 2 title
+      xf({ font: 2, h: 'center', wrap: true }),                         // 2 title
       xf({ font: 1 }),                                                  // 3 bold
       xf({ num: 10, h: 'center' }),                                     // 4 pct
       xf({ font: 3, h: 'left', wrap: true, indent: 1 }),                // 5 note
@@ -1270,6 +1281,10 @@ function mergeWorkerMain() {
       // a compact row shows the first line.
       xf({ bd: 1, h: 'left', v: 'top', wrap: true, indent: 1 }),       // 27 findings text
       xf({ bd: 1, h: 'center', v: 'top' }),                             // 28 findings number
+      xf({ font: 4, fill: 8, bd: 1, h: 'center', v: 'top' }),          // 29 findings PASSED
+      xf({ font: 4, fill: 9, bd: 1, h: 'center', v: 'top' }),          // 30 findings FAILED
+      xf({ font: 1, fill: 13, bd: 1, h: 'center', v: 'top' }),         // 31 findings WARNING
+      xf({ font: 1, fill: 14, bd: 1, h: 'center', v: 'top' }),         // 32 findings ERROR
     ];
     return XML_DECL + `<styleSheet xmlns="${NS_MAIN}">` +
       `<fonts count="${fonts.length}">${fonts.join('')}</fonts>` +
@@ -1326,7 +1341,17 @@ function mergeWorkerMain() {
       '<a:endParaRPr lang="en-US"/></a:p></c:txPr></c:chartSpace>';
   }
 
-  function drawingXml(anchors) {
+  // Pictures follow the charts, so picture i uses rId(charts + i + 1).
+  function drawingXml(anchors, images = []) {
+    const pics = images.map((im, i) =>
+      '<xdr:oneCellAnchor>' +
+      `<xdr:from><xdr:col>${im.col}</xdr:col><xdr:colOff>${im.colOff}</xdr:colOff><xdr:row>${im.row}</xdr:row><xdr:rowOff>${im.rowOff}</xdr:rowOff></xdr:from>` +
+      `<xdr:ext cx="${im.cx}" cy="${im.cy}"/>` +
+      `<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="${anchors.length + i + 2}" name="${escAttr(im.name)}"/>` +
+      '<xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>' +
+      `<xdr:blipFill><a:blip xmlns:r="${NS_REL}" r:embed="rId${anchors.length + i + 1}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>` +
+      `<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${im.cx}" cy="${im.cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>` +
+      '</xdr:pic><xdr:clientData/></xdr:oneCellAnchor>').join('');
     return XML_DECL +
       '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" ' +
       'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">' +
@@ -1339,7 +1364,7 @@ function mergeWorkerMain() {
         '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">' +
         `<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="${NS_REL}" r:id="rId${i + 1}"/>` +
         '</a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>').join('') +
-      '</xdr:wsDr>';
+      pics + '</xdr:wsDr>';
   }
 
   class XlsxOutput {
@@ -1351,6 +1376,7 @@ function mergeWorkerMain() {
       this.cols = cols;
       this.withSummary = withSummary;
       this.letters = cols.map((_, i) => colLetter(i));
+      this.resultCol = cols.findIndex(c => c.toLowerCase() === 'compliance result');
       this.queue = [];          // row XML and NEW_SHEET markers awaiting flush()
       this.pending = '';
       this.pendingLen = 0;
@@ -1375,7 +1401,10 @@ function mergeWorkerMain() {
     // every wrapped row to its full text.
     rowXml(values, r, style, height = this.fitRows ? 0 : COMPACT_ROW_HEIGHT) {
       let xml = `<row r="${r}"${height ? ` ht="${height}" customHeight="1"` : ''}>`;
-      for (let i = 0; i < values.length; i++) xml += this.cellXml(values[i], this.letters[i] + r, style);
+      for (let i = 0; i < values.length; i++) {
+        const s = !style && i === this.resultCol && values[i] ? resultStyle(values[i]) : style;
+        xml += this.cellXml(values[i], this.letters[i] + r, s);
+      }
       return xml + '</row>';
     }
 
@@ -1408,14 +1437,14 @@ function mergeWorkerMain() {
 
     sheetName(i) { return findingsSheetName(i); }
 
-    sheetHead({ widths, freeze, selected, gridlines = true, print = false, rowHeight = 20, fit = false }) {
+    sheetHead({ widths, freeze, selected, gridlines = true, print = false, rowHeight = 20, fit = false, active = 'A1' }) {
       const cols = widths.map((w, j) => `<col min="${j + 1}" max="${j + 1}" width="${w}" customWidth="1"/>`).join('');
       return XML_DECL + `<worksheet xmlns="${NS_MAIN}" xmlns:r="${NS_REL}">` +
         (print ? '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>' : '') +
         `<sheetViews><sheetView workbookViewId="0"${gridlines ? '' : ' showGridLines="0"'}${selected ? ' tabSelected="1"' : ''}>` +
         (freeze
           ? '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/>'
-          : '<selection activeCell="A1" sqref="A1"/>') +
+          : `<selection activeCell="${active}" sqref="${active}"/>`) +
         `</sheetView></sheetViews>` +
         (fit ? '<sheetFormatPr defaultRowHeight="15"/>' : `<sheetFormatPr defaultRowHeight="${rowHeight}" customHeight="1"/>`) +
         `${cols ? `<cols>${cols}</cols>` : ''}<sheetData>`;
@@ -1456,7 +1485,7 @@ function mergeWorkerMain() {
     // Cells are strings, numbers, null, or { v, s } with a style index.
     async writeSpecSheet(spec, fileIndex, selected) {
       const stream = this.zip.openStream(`xl/worksheets/sheet${fileIndex}.xml`);
-      let xml = this.sheetHead({ widths: spec.widths, freeze: spec.freeze, selected, gridlines: spec.gridlines !== false, print: !!spec.print });
+      let xml = this.sheetHead({ widths: spec.widths, freeze: spec.freeze, selected, gridlines: spec.gridlines !== false, print: !!spec.print, active: spec.active });
       for (let r = 0; r < spec.rows.length; r++) {
         const cells = spec.rows[r];
         let ht = spec.heights && spec.heights[r];
@@ -1504,7 +1533,7 @@ function mergeWorkerMain() {
           '<pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.3" footer="0.3"/>' +
           '<pageSetup paperSize="9" orientation="portrait" fitToWidth="1" fitToHeight="0"/>';
       }
-      if (spec.charts && spec.charts.length) xml += '<drawing r:id="rId1"/>';
+      if ((spec.charts && spec.charts.length) || (spec.images && spec.images.length)) xml += '<drawing r:id="rId1"/>';
       await stream.write(xml + '</worksheet>');
       await stream.close();
       await this.sink.flush();
@@ -1523,19 +1552,33 @@ function mergeWorkerMain() {
       const book = [];
       const drawings = [];
       let chartNo = 0;
+      let imageNo = 0;
+      const mediaTypes = new Set();
       for (let k = 0; k < specs.length; k++) {
         const spec = specs[k];
         const file = findings + k + 1;
         await this.writeSpecSheet(spec, file, k === 0);
-        book.push({ name: spec.name, file, filter: spec.filter ? spec.filter.replace(/([A-Z]+)(\d+)/g, '$$$1$$$2') : null });
-        if (spec.charts && spec.charts.length) {
+        book.push({
+          name: spec.name, file, filter: spec.filter ? spec.filter.replace(/([A-Z]+)(\d+)/g, '$$$1$$$2') : null,
+          printArea: spec.printArea ? spec.printArea.replace(/([A-Z]+)(\d+)/g, '$$$1$$$2') : null,
+        });
+        const specCharts = spec.charts || [];
+        const specImages = spec.images || [];
+        if (specCharts.length || specImages.length) {
           const d = drawings.length + 1;
-          const charts = spec.charts.map(() => ++chartNo);
-          spec.charts.forEach((an, j) => this.zip.addFile(`xl/charts/chart${charts[j]}.xml`, chartXml({ ...an.chart, sheet: spec.name })));
-          this.zip.addFile(`xl/drawings/drawing${d}.xml`, drawingXml(spec.charts));
+          const charts = specCharts.map(() => ++chartNo);
+          specCharts.forEach((an, j) => this.zip.addFile(`xl/charts/chart${charts[j]}.xml`, chartXml({ ...an.chart, sheet: spec.name })));
+          const media = specImages.map(im => {
+            const path = `image${++imageNo}.${im.ext}`;
+            mediaTypes.add(im.ext);
+            this.zip.addFile(`xl/media/${path}`, im.bytes);
+            return path;
+          });
+          this.zip.addFile(`xl/drawings/drawing${d}.xml`, drawingXml(specCharts, specImages));
           this.zip.addFile(`xl/drawings/_rels/drawing${d}.xml.rels`, XML_DECL +
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
             charts.map((n, j) => `<Relationship Id="rId${j + 1}" Type="${NS_REL}/chart" Target="../charts/chart${n}.xml"/>`).join('') +
+            media.map((m, j) => `<Relationship Id="rId${charts.length + j + 1}" Type="${NS_REL}/image" Target="../media/${m}"/>`).join('') +
             '</Relationships>');
           this.zip.addFile(`xl/worksheets/_rels/sheet${file}.xml.rels`, XML_DECL +
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
@@ -1551,6 +1594,7 @@ function mergeWorkerMain() {
         '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
         '<Default Extension="xml" ContentType="application/xml"/>' +
+        [...mediaTypes].map(ext => `<Default Extension="${ext}" ContentType="image/${ext}"/>`).join('') +
         '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
         '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
         book.map(b => `<Override PartName="/xl/worksheets/sheet${b.file}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('') +
@@ -1567,6 +1611,8 @@ function mergeWorkerMain() {
         '</sheets><definedNames>' +
         book.map((b, i) => (b.filter
           ? `<definedName name="_xlnm._FilterDatabase" localSheetId="${i}" hidden="1">${escAttr(`'${b.name}'`)}!${b.filter}</definedName>`
+          : '') + (b.printArea
+          ? `<definedName name="_xlnm.Print_Area" localSheetId="${i}">${escAttr(`'${b.name}'`)}!${b.printArea}</definedName>`
           : '')).join('') +
         '</definedNames></workbook>');
       this.zip.addFile('xl/_rels/workbook.xml.rels', XML_DECL +
@@ -1750,11 +1796,15 @@ function mergeWorkerMain() {
     const authList = agg.auth.slice().sort((x, y) =>
       collator.compare(x.host, y.host) || collator.compare(x.ip, y.ip) || collator.compare(x.source, y.source) || collator.compare(x.port, y.port));
 
-    // --- Dashboard: an 8-column grid (B\u2013I) between narrow margins, gridlines
-    // off. Every row's spans add up to 8 so tables line up and stay centred;
-    // charts get their own reserved rows so they never cover a table.
+    // --- Dashboard: an 8-column grid (E\u2013L) after four margin columns, so it
+    // opens towards the middle of the screen, gridlines off. Every row's spans
+    // add up to 8 so tables line up and stay centred; charts get their own
+    // reserved rows so they never cover a table.
     const GRID = 8;
     const COL_WIDTH = 16;
+    const LEFT = 4;          // margin columns A\u2013D; the grid starts at E
+    const MARGIN_WIDTH = 12;
+    const gridCol = k => colLetter(LEFT + k); // k-th grid column's letter
     const rows = [];
     const merges = [];
     const heights = {};
@@ -1763,7 +1813,7 @@ function mergeWorkerMain() {
     // items: [{ v, s, span }]; returns the 1-based row number.
     const line = (items, ht) => {
       const r = rows.length + 1;
-      const cells = [null]; // column A is the left margin
+      const cells = Array(LEFT).fill(null); // margin columns
       let lines = 1;
       for (const it of items) {
         const span = it.span || 1;
@@ -1787,8 +1837,31 @@ function mergeWorkerMain() {
     const full = (v, s, ht) => line([{ v, s, span: GRID }], ht);
     const head = labels => line(labels.map(([v, span]) => ({ v, s: ST.header, span })), 24);
 
-    full('Database Compliance \u2014 Merged Summary', ST.title, 34);
-    full(`Generated ${meta.generated} from ${meta.reports} report${meta.reports === 1 ? '' : 's'}` +
+    // Optional company logo, centred above the title in a row of its own.
+    const images = [];
+    if (meta.logo && meta.logo.bytes && meta.logo.width && meta.logo.height) {
+      const LOGO_ROW_PT = 66;
+      const px = w => Math.trunc(w * 7 + 5); // Arial 10: 7 px per character + padding
+      const rowPx = Math.round(LOGO_ROW_PT * 96 / 72);
+      const scale = Math.min((rowPx - 8) / meta.logo.height, (px(COL_WIDTH) * 4) / meta.logo.width);
+      const w = Math.max(1, Math.round(meta.logo.width * scale));
+      const h = Math.max(1, Math.round(meta.logo.height * scale));
+      const x = Math.max(0, Math.round((px(COL_WIDTH) * GRID - w) / 2));
+      const EMU = 9525;
+      images.push({
+        name: 'Logo', ext: meta.logo.ext, bytes: meta.logo.bytes,
+        col: LEFT + Math.floor(x / px(COL_WIDTH)), colOff: (x % px(COL_WIDTH)) * EMU,
+        row: rows.length, rowOff: Math.round((rowPx - h) / 2) * EMU, cx: w * EMU, cy: h * EMU,
+      });
+      blank(LOGO_ROW_PT);
+    }
+    const DEFAULT_TITLE = 'Database Compliance \u2014 Merged Summary';
+    const title = (meta.reportTitle || '').trim() || DEFAULT_TITLE;
+    // The title wraps in its merged cells; give long titles the rows they need.
+    const titleLines = wrappedLines(title, GRID * COL_WIDTH * 1.25 / 1.7);
+    line([{ v: title, s: ST.title, span: GRID }], Math.max(34, Math.min(titleLines, 4) * 22 + 10));
+    full((title !== DEFAULT_TITLE ? `${DEFAULT_TITLE} \u00B7 ` : '') +
+      `Generated ${meta.generated} from ${meta.reports} report${meta.reports === 1 ? '' : 's'}` +
       (meta.appVersion ? ` \u00B7 Tenable Database Compliance Merger v${meta.appVersion}` : ''), ST.subtitle, 18);
     blank(10);
 
@@ -1834,8 +1907,8 @@ function mergeWorkerMain() {
       blank(10);
     }
     const anchors = chartTypes.length === 2
-      ? { bar: [1, 5], doughnut: [5, 9] }
-      : { [chartTypes[0]]: [2, 8] }; // columns C\u2013H, centred
+      ? { bar: [LEFT, LEFT + 4], doughnut: [LEFT + 4, LEFT + 8] }
+      : { [chartTypes[0]]: [LEFT + 1, LEFT + 7] }; // grid columns 2\u20137, centred
     const charts = [];
     const addChart = (type, chart) => {
       const [c0, c1] = anchors[type];
@@ -1862,7 +1935,7 @@ function mergeWorkerMain() {
         { v: 1, s: ST.tdPct, span: 2 }, { v: '', s: ST.tdNum, span: 2 }]);
       blank(10);
       addChart('bar', {
-        title: 'Vulnerability findings by severity', catRange: `$B$${first}:$B$${last}`, valRange: `$D$${first}:$D$${last}`,
+        title: 'Vulnerability findings by severity', catRange: `$${gridCol(0)}$${first}:$${gridCol(0)}$${last}`, valRange: `$${gridCol(2)}$${first}:$${gridCol(2)}$${last}`,
         cats: sevRows.map(s => s[0]), vals: sevRows.map(s => agg.sev[SEVERITIES.indexOf(s)]), colors: sevRows.map(s => s[2]),
       });
     }
@@ -1879,7 +1952,7 @@ function mergeWorkerMain() {
       full('Score = Passed \u00F7 (Passed + Failed + Warning / Manual check)', ST.note);
       blank(10);
       addChart('doughnut', {
-        title: 'Compliance results', catRange: `$B$${first}:$B$${last}`, valRange: `$F$${first}:$F$${last}`,
+        title: 'Compliance results', catRange: `$${gridCol(0)}$${first}:$${gridCol(0)}$${last}`, valRange: `$${gridCol(4)}$${first}:$${gridCol(4)}$${last}`,
         cats: COMPLIANCE_RESULTS.map(r => r[0]), vals: agg.comp.slice(), colors: COMPLIANCE_RESULTS.map(r => r[2]),
       });
     }
@@ -2005,8 +2078,10 @@ function mergeWorkerMain() {
       }
     }
     sheets.push({
-      name: 'Dashboard', widths: [2, ...Array(GRID).fill(COL_WIDTH), 2], rows, merges, heights,
-      freeze: false, gridlines: false, print: true, charts,
+      name: 'Dashboard', widths: [...Array(LEFT).fill(MARGIN_WIDTH), ...Array(GRID).fill(COL_WIDTH), 2], rows, merges, heights,
+      freeze: false, gridlines: false, print: true, charts, images, active: `${gridCol(0)}1`,
+      // Prints the grid only, not the margin columns.
+      printArea: `${gridCol(0)}1:${gridCol(GRID - 1)}${rows.length}`,
     });
 
     // --- Hosts
@@ -2407,6 +2482,11 @@ function mergeWorkerMain() {
         excluded: totals.filtered + totals.excluded,
         authPlugins: [...authIds],
         identity,
+        reportTitle: typeof options.reportTitle === 'string' ? options.reportTitle.slice(0, 200) : '',
+        logo: options.logo && options.logo.bytes && ['png', 'jpeg', 'gif'].includes(options.logo.ext) ? {
+          ext: options.logo.ext, bytes: new Uint8Array(options.logo.bytes),
+          width: +options.logo.width || 0, height: +options.logo.height || 0,
+        } : null,
         appVersion: options.appVersion || '',
         findingsSheets: out.sheetRows ? out.sheetRows.length : 1,
         sources,
@@ -2469,6 +2549,6 @@ function mergeWorkerMain() {
   // Exposed for the Node test harness; harmless in the browser.
   self.__mergeInternals = {
     CsvStreamParser, NessusStreamParser, HashSet64, hash64, compileRules, listZip, scanFile, crc32,
-    ZipWriter, OutputSink, textChunks, xmlEscape, extractDatabases, WORKER_VERSION,
+    ZipWriter, OutputSink, textChunks, xmlEscape, extractDatabases, resultStyle, ST, WORKER_VERSION,
   };
 }

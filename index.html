@@ -204,6 +204,8 @@
     .format input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: -2px; }
     fieldset.report-type { margin-bottom: 16px; }
     .inline-field { margin-top: 0; max-width: 420px; }
+    .logo-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-weight: 400; }
+    #logo-preview { max-height: 40px; max-width: 160px; border: 1px solid var(--border); border-radius: 4px; background: #fff; padding: 2px; }
     .field-help { display: block; font-weight: 400; color: var(--muted); }
     .mode-help { margin: 6px 0 0; color: var(--muted); font-size: 12.5px; }
     .dz-sub code { font-family: var(--mono); font-size: 12.5px; }
@@ -349,6 +351,22 @@
           <input type="text" id="opt-auth" value="104410" spellcheck="false" placeholder="e.g. 104410, 21745">
         </label>
         <p class="mode-help">Hosts where Tenable could not log in with the provided credentials get their own dashboard section and an "Auth Failures" sheet (protocol, port, user, error). These rows are never counted as compliance checks or vulnerabilities, and in the Excel workbook they appear only on the Auth Failures sheet, not in Findings. Leave empty to turn off.</p>
+      </fieldset>
+
+      <fieldset class="report-type" id="opt-brand-wrap">
+        <legend>Dashboard title &amp; logo</legend>
+        <label class="field inline-field">Report title
+          <input type="text" id="opt-title" maxlength="200" spellcheck="false" placeholder="Database Compliance &#x2014; Merged Summary">
+        </label>
+        <div class="field logo-field">Company logo
+          <div class="logo-row">
+            <img id="logo-preview" alt="Logo preview" hidden>
+            <button type="button" class="btn small" id="logo-pick">Choose image&#x2026;</button>
+            <button type="button" class="btn small ghost danger" id="logo-remove" hidden>Remove</button>
+            <span class="field-help" id="logo-name"></span>
+          </div>
+        </div>
+        <p class="mode-help">Shown at the top of the Excel dashboard: the logo centred above the title. Leave the title empty for the default. Logo: PNG, JPEG, GIF or SVG (converted to PNG so every Excel version shows it), up to 2 MB. Both are remembered in this browser.</p>
       </fieldset>
 
       <div class="options-grid">
